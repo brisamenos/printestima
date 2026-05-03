@@ -1,6 +1,6 @@
 {
   "name": "estimafood-print",
-  "version": "2.0.3",
+  "version": "2.0.2",
   "description": "PrintEstima Web — Serviço de Impressão em Segundo Plano",
   "main": "src/main.js",
   "author": "EstimaFood",
