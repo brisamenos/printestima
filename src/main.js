@@ -23,7 +23,7 @@ app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 // ── Config persistente ──────────────────────────────────────
 const store = new Store({
   defaults: {
-    serverUrl: '',
+    serverUrl: 'https://estimafood.evocrm.sbs/gestor.html',
     printer: '',
     paperWidth: 80,
     printableWidth: 0, // 0 = auto (usa pior caso seguro: 70mm para 80mm, 45mm para 58mm)
@@ -91,7 +91,7 @@ function createWindow() {
     maxWidth: 500,
     resizable: false,
     icon: getIcon(),
-    title: 'EstimaFood Print',
+    title: 'PrintEstima Web',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -297,7 +297,7 @@ function createTray() {
     }
   ]);
 
-  tray.setToolTip('EstimaFood Print — Serviço de Impressão');
+  tray.setToolTip('PrintEstima Web — Serviço de Impressão');
   tray.setContextMenu(contextMenu);
   tray.on('double-click', () => showStatusPage());
 }
@@ -1374,7 +1374,7 @@ ipcMain.handle('print:setTenantId', (_e, tid) => {
     log('🫥 Login detectado! Minimizando para bandeja...');
     if (Notification.isSupported()) {
       new Notification({
-        title: 'EstimaFood Print',
+        title: 'PrintEstima Web',
         body: '✅ Serviço de impressão ativo! O app está na bandeja do sistema.',
         icon: getIcon(),
       }).show();
@@ -1440,7 +1440,7 @@ function setupUpdater() {
       log('📦 Atualização disponível:', info.version);
       if (Notification.isSupported()) {
         new Notification({
-          title: 'EstimaFood Print',
+          title: 'PrintEstima Web',
           body: `Baixando versão ${info.version}...`,
           icon: getIcon(),
         }).show();
@@ -1459,7 +1459,7 @@ function setupUpdater() {
       log('✅ Atualização baixada:', info.version, '— instalando em 10s...');
       if (Notification.isSupported()) {
         new Notification({
-          title: 'EstimaFood Print',
+          title: 'PrintEstima Web',
           body: `Versão ${info.version} pronta! Reiniciando em 10 segundos...`,
           icon: getIcon(),
         }).show();
@@ -1512,7 +1512,7 @@ function _applyRegistryAutoStart(enabled, exePath) {
       // com nome diferente (produto: "EstimaFood Print") para garantir disable total.
       psScript = [
         `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${REG_NAME}' -ErrorAction SilentlyContinue`,
-        `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'EstimaFood Print' -ErrorAction SilentlyContinue`,
+        `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'PrintEstima Web' -ErrorAction SilentlyContinue`,
       ].join('; ');
     }
     // -EncodedCommand recebe UTF-16LE em base64 — bypassa o quoting do cmd.exe
@@ -1648,7 +1648,7 @@ if (!gotLock) {
       else if (mainWindow) { mainWindow.show(); mainWindow.focus(); mainWindow.webContents.focus(); }
     });
 
-    log('✅ EstimaFood Print iniciado | versão:', app.getVersion());
+    log('✅ PrintEstima Web iniciado | versão:', app.getVersion());
   });
 
   app.on('before-quit', () => { isQuitting = true; });

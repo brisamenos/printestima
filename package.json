@@ -1,7 +1,7 @@
 {
   "name": "estimafood-print",
   "version": "2.0.2",
-  "description": "EstimaFood Print — Serviço de Impressão em Segundo Plano",
+  "description": "PrintEstima Web — Serviço de Impressão em Segundo Plano",
   "main": "src/main.js",
   "author": "EstimaFood",
   "license": "MIT",
@@ -32,8 +32,8 @@
   },
   "build": {
     "appId": "com.estimafood.print",
-    "productName": "EstimaFood Print",
-    "artifactName": "EstimaFoodPrint-${version}-${os}-${arch}.${ext}",
+    "productName": "PrintEstima Web",
+    "artifactName": "PrintEstimaWeb-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "dist",
       "buildResources": "assets"
@@ -61,7 +61,7 @@
       "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "EstimaFood Print",
+      "shortcutName": "PrintEstima Web",
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "installerSidebar": null,
