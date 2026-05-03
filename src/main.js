@@ -1487,50 +1487,60 @@ function setupUpdater() {
 }
 
 // ── Auto-start com Windows ──────────────────────────────────
-// Usa PowerShell para escrever diretamente no registry HKCU\Run — método mais
-// confiável que setLoginItemSettings (que é rejeitado silenciosamente em alguns
-// Windows com políticas de grupo ou antivírus agressivo).
-// O path do exe é sempre entre aspas para suportar espaços no caminho.
-const REG_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+// Estratégia dupla: Electron API + escrita direta no registry via PowerShell
+// EncodedCommand (UTF-16LE base64 — bypassa todo problema de quoting do cmd.exe).
+// Sempre aplica os dois métodos, pois setLoginItemSettings pode falhar
+// silenciosamente em Windows com política de grupo ou antivírus agressivo,
+// e pode usar um nome de chave diferente do nosso ("EstimaFood Print" vs
+// "EstimaFoodPrint"), deixando entrada obsoleta no registry após updates.
 const REG_NAME = 'EstimaFoodPrint';
 
 function _applyRegistryAutoStart(enabled, exePath) {
   return new Promise((resolve) => {
     const { exec } = require('child_process');
-    let cmd;
+    // PowerShell script usa single-quotes internamente — sem problema com
+    // paths que têm espaços, acentos ou outros caracteres especiais.
+    // Single-quotes no path são escapadas como '' (padrão PowerShell).
+    let psScript;
     if (enabled) {
-      // Valor: "C:\caminho\com espaço\app.exe" --hidden
-      const value = '"' + exePath.replace(/"/g, '\\"') + '" --hidden';
-      cmd = `powershell -NoProfile -NonInteractive -Command "` +
-        `Set-ItemProperty -Path 'Registry::${REG_KEY}' -Name '${REG_NAME}' -Value '${value.replace(/'/g, "''")}' -Type String -Force` +
-        `"`;
+      const safePath = exePath.replace(/'/g, "''");
+      // Valor gravado no registry: "C:\path with spaces\app.exe" --hidden
+      // As aspas duplas são necessárias para Windows interpretar paths com espaços.
+      psScript = `Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${REG_NAME}' -Value '"${safePath}" --hidden' -Type String -Force`;
     } else {
-      cmd = `powershell -NoProfile -NonInteractive -Command "` +
-        `Remove-ItemProperty -Path 'Registry::${REG_KEY}' -Name '${REG_NAME}' -ErrorAction SilentlyContinue` +
-        `"`;
+      // Remove nossa entrada E também a entrada que Electron pode ter criado
+      // com nome diferente (produto: "EstimaFood Print") para garantir disable total.
+      psScript = [
+        `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${REG_NAME}' -ErrorAction SilentlyContinue`,
+        `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'EstimaFood Print' -ErrorAction SilentlyContinue`,
+      ].join('; ');
     }
+    // -EncodedCommand recebe UTF-16LE em base64 — bypassa o quoting do cmd.exe
+    const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+    const cmd = `powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
     exec(cmd, { timeout: 8000 }, (err) => {
       if (err) {
-        log('⚠️ Registry autostart PowerShell erro:', err.message);
+        log('⚠️ Registry autostart erro:', err.message);
         resolve(false);
       } else {
-        log('🚀 Registry autostart ' + (enabled ? 'habilitado' : 'removido') + ' via PowerShell');
+        log('🚀 Registry autostart ' + (enabled ? 'habilitado' : 'removido'));
         resolve(true);
       }
     });
   });
 }
 
-function _checkRegistryAutoStart(exePath) {
+function _checkRegistryAutoStart() {
   return new Promise((resolve) => {
     const { exec } = require('child_process');
-    const cmd = `powershell -NoProfile -NonInteractive -Command "` +
-      `try { (Get-ItemProperty -Path 'Registry::${REG_KEY}' -Name '${REG_NAME}' -ErrorAction Stop).'${REG_NAME}' } catch { '' }` +
-      `"`;
+    const cmd = `reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "${REG_NAME}"`;
     exec(cmd, { timeout: 5000 }, (err, stdout) => {
       if (err) { resolve(null); return; }
-      const val = (stdout || '').trim();
-      resolve(val || null);
+      // Saída típica: "    EstimaFoodPrint    REG_SZ    <valor>"
+      const match = (stdout || '').match(/REG_SZ\s+(.+)/);
+      // Se regex não bateu, retorna null — não usa stdout bruto para evitar
+      // falsa comparação de paths.
+      resolve(match ? match[1].trim() : null);
     });
   });
 }
@@ -1541,38 +1551,19 @@ async function setupAutoStart() {
     const enabled = !!store.get('autoStart');
     const exePath = app.getPath('exe');
 
-    // Tenta primeiro via Electron API
-    app.setLoginItemSettings({
-      openAtLogin: enabled,
-      path: exePath,
-      args: ['--hidden'],
-    });
-
-    // Verifica se foi aplicado corretamente
-    const status = app.getLoginItemSettings({ path: exePath, args: ['--hidden'] });
-    const electronOk = (enabled === !!status.openAtLogin);
-
-    if (!electronOk) {
-      log('⚠️ setLoginItemSettings não aplicou corretamente — usando fallback registry PowerShell');
-      await _applyRegistryAutoStart(enabled, exePath);
-    } else {
-      // Verifica também se o valor real no registry bate com o exe atual
-      // (pode estar apontando pra um path antigo de versão anterior)
-      const regVal = await _checkRegistryAutoStart(exePath);
-      if (enabled && regVal && !regVal.includes(exePath)) {
-        log('⚠️ Registry aponta para exe diferente (' + regVal + ') — corrigindo...');
-        await _applyRegistryAutoStart(enabled, exePath);
-      } else {
-        log('🚀 AutoStart:', enabled ? 'habilitado' : 'desabilitado', '|', exePath);
-      }
+    // Método 1: Electron API (tenta, mas pode falhar silenciosamente)
+    try {
+      app.setLoginItemSettings({ openAtLogin: enabled, path: exePath, args: ['--hidden'] });
+    } catch (e) {
+      log('⚠️ setLoginItemSettings erro:', e.message);
     }
+
+    // Método 2: Registry direto via PowerShell EncodedCommand (sempre aplica)
+    // Garante autostart mesmo que Electron API falhe ou use chave diferente.
+    const ok = await _applyRegistryAutoStart(enabled, exePath);
+    log('🚀 AutoStart:', enabled ? 'habilitado' : 'desabilitado', '| registry:', ok ? 'ok' : 'falhou', '|', exePath);
   } catch (e) {
     log('⚠️ AutoStart erro:', e.message);
-    // Última tentativa: fallback direto
-    try {
-      const exePath = app.getPath('exe');
-      await _applyRegistryAutoStart(!!store.get('autoStart'), exePath);
-    } catch {}
   }
 }
 
@@ -1581,10 +1572,11 @@ ipcMain.handle('app:getAutoStart', async () => {
   if (process.platform !== 'win32') return { supported: false, enabled: false };
   try {
     const exePath = app.getPath('exe');
-    // Checa diretamente no registry (fonte da verdade)
-    const regVal = await _checkRegistryAutoStart(exePath);
+    // Checa nossa entrada no registry (fonte da verdade para nossa escrita)
+    const regVal = await _checkRegistryAutoStart();
+    // Considera habilitado se o valor contém o exe atual
     const enabledInRegistry = !!(regVal && regVal.includes(exePath));
-    return { supported: true, enabled: enabledInRegistry, stored: !!store.get('autoStart'), regVal: regVal || '' };
+    return { supported: true, enabled: enabledInRegistry, stored: !!store.get('autoStart') };
   } catch (e) {
     return { supported: true, enabled: false, error: e.message };
   }
