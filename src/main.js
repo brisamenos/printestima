@@ -1487,47 +1487,111 @@ function setupUpdater() {
 }
 
 // ── Auto-start com Windows ──────────────────────────────────
-// Versão antiga só ligava se autoStart=true, deixando registry órfão se mudou
-// pra false. Agora sempre re-aplica o estado correto, e usa caminho explícito
-// do .exe (NSIS oneClick reinstala em path novo a cada update — sem path
-// explícito o registry pode apontar pra exe que não existe mais).
-function setupAutoStart() {
+// Usa PowerShell para escrever diretamente no registry HKCU\Run — método mais
+// confiável que setLoginItemSettings (que é rejeitado silenciosamente em alguns
+// Windows com políticas de grupo ou antivírus agressivo).
+// O path do exe é sempre entre aspas para suportar espaços no caminho.
+const REG_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+const REG_NAME = 'EstimaFoodPrint';
+
+function _applyRegistryAutoStart(enabled, exePath) {
+  return new Promise((resolve) => {
+    const { exec } = require('child_process');
+    let cmd;
+    if (enabled) {
+      // Valor: "C:\caminho\com espaço\app.exe" --hidden
+      const value = '"' + exePath.replace(/"/g, '\\"') + '" --hidden';
+      cmd = `powershell -NoProfile -NonInteractive -Command "` +
+        `Set-ItemProperty -Path 'Registry::${REG_KEY}' -Name '${REG_NAME}' -Value '${value.replace(/'/g, "''")}' -Type String -Force` +
+        `"`;
+    } else {
+      cmd = `powershell -NoProfile -NonInteractive -Command "` +
+        `Remove-ItemProperty -Path 'Registry::${REG_KEY}' -Name '${REG_NAME}' -ErrorAction SilentlyContinue` +
+        `"`;
+    }
+    exec(cmd, { timeout: 8000 }, (err) => {
+      if (err) {
+        log('⚠️ Registry autostart PowerShell erro:', err.message);
+        resolve(false);
+      } else {
+        log('🚀 Registry autostart ' + (enabled ? 'habilitado' : 'removido') + ' via PowerShell');
+        resolve(true);
+      }
+    });
+  });
+}
+
+function _checkRegistryAutoStart(exePath) {
+  return new Promise((resolve) => {
+    const { exec } = require('child_process');
+    const cmd = `powershell -NoProfile -NonInteractive -Command "` +
+      `try { (Get-ItemProperty -Path 'Registry::${REG_KEY}' -Name '${REG_NAME}' -ErrorAction Stop).'${REG_NAME}' } catch { '' }` +
+      `"`;
+    exec(cmd, { timeout: 5000 }, (err, stdout) => {
+      if (err) { resolve(null); return; }
+      const val = (stdout || '').trim();
+      resolve(val || null);
+    });
+  });
+}
+
+async function setupAutoStart() {
   if (process.platform !== 'win32') return;
   try {
     const enabled = !!store.get('autoStart');
     const exePath = app.getPath('exe');
+
+    // Tenta primeiro via Electron API
     app.setLoginItemSettings({
       openAtLogin: enabled,
-      openAsHidden: true,
       path: exePath,
       args: ['--hidden'],
     });
-    // Verifica se ficou bem aplicado (em alguns Windows o registry rejeita silenciosamente)
+
+    // Verifica se foi aplicado corretamente
     const status = app.getLoginItemSettings({ path: exePath, args: ['--hidden'] });
-    if (enabled !== status.openAtLogin) {
-      log('⚠️ AutoStart: config solicitada=' + enabled + ' mas sistema retornou=' + status.openAtLogin);
+    const electronOk = (enabled === !!status.openAtLogin);
+
+    if (!electronOk) {
+      log('⚠️ setLoginItemSettings não aplicou corretamente — usando fallback registry PowerShell');
+      await _applyRegistryAutoStart(enabled, exePath);
     } else {
-      log('🚀 AutoStart:', enabled ? 'habilitado' : 'desabilitado', '|', exePath);
+      // Verifica também se o valor real no registry bate com o exe atual
+      // (pode estar apontando pra um path antigo de versão anterior)
+      const regVal = await _checkRegistryAutoStart(exePath);
+      if (enabled && regVal && !regVal.includes(exePath)) {
+        log('⚠️ Registry aponta para exe diferente (' + regVal + ') — corrigindo...');
+        await _applyRegistryAutoStart(enabled, exePath);
+      } else {
+        log('🚀 AutoStart:', enabled ? 'habilitado' : 'desabilitado', '|', exePath);
+      }
     }
   } catch (e) {
     log('⚠️ AutoStart erro:', e.message);
+    // Última tentativa: fallback direto
+    try {
+      const exePath = app.getPath('exe');
+      await _applyRegistryAutoStart(!!store.get('autoStart'), exePath);
+    } catch {}
   }
 }
 
 // IPC pra UI ligar/desligar autostart e ver status atual
-ipcMain.handle('app:getAutoStart', () => {
+ipcMain.handle('app:getAutoStart', async () => {
   if (process.platform !== 'win32') return { supported: false, enabled: false };
   try {
     const exePath = app.getPath('exe');
-    const status = app.getLoginItemSettings({ path: exePath, args: ['--hidden'] });
-    return { supported: true, enabled: !!status.openAtLogin, stored: !!store.get('autoStart') };
+    // Checa diretamente no registry (fonte da verdade)
+    const regVal = await _checkRegistryAutoStart(exePath);
+    const enabledInRegistry = !!(regVal && regVal.includes(exePath));
+    return { supported: true, enabled: enabledInRegistry, stored: !!store.get('autoStart'), regVal: regVal || '' };
   } catch (e) {
     return { supported: true, enabled: false, error: e.message };
   }
 });
-ipcMain.handle('app:setAutoStart', (_e, enabled) => {
+ipcMain.handle('app:setAutoStart', async (_e, enabled) => {
   store.set('autoStart', !!enabled);
-  setupAutoStart();
+  await setupAutoStart();
   return { ok: true };
 });
 
@@ -1576,12 +1640,12 @@ if (!gotLock) {
   });
 
   // ── App lifecycle ───────────────────────────────────────────
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     _cleanupTmpFiles();
     setupIPC();
     createWindow();
     createTray();
-    setupAutoStart();
+    await setupAutoStart();
     startPrintQueuePolling(); // Inicia polling do print-queue
 
     // Auto-updater só em produção
