@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>EstimaFood Print — Configuração</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0a0a0f;
+      color: #e4e4e7;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    .card {
+      background: #18181b;
+      border: 1px solid #27272a;
+      border-radius: 16px;
+      padding: 40px;
+      width: 480px;
+      max-width: 90vw;
+      text-align: center;
+    }
+    .logo {
+      font-size: 42px;
+      margin-bottom: 4px;
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+    .sub {
+      font-size: 13px;
+      color: #71717a;
+      margin-bottom: 32px;
+    }
+    label {
+      display: block;
+      text-align: left;
+      font-size: 12px;
+      font-weight: 600;
+      color: #a1a1aa;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    input {
+      width: 100%;
+      padding: 14px 16px;
+      background: #0a0a0f;
+      border: 1px solid #3f3f46;
+      border-radius: 10px;
+      color: #e4e4e7;
+      font-size: 15px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input:focus { border-color: #3b82f6; }
+    input::placeholder { color: #52525b; }
+    .btn {
+      width: 100%;
+      margin-top: 20px;
+      padding: 14px;
+      background: #3b82f6;
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: #2563eb; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status {
+      margin-top: 16px;
+      font-size: 13px;
+      min-height: 20px;
+    }
+    .status.ok { color: #22c55e; }
+    .status.err { color: #ef4444; }
+    .hint {
+      margin-top: 24px;
+      font-size: 11.5px;
+      color: #52525b;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">🖨️</div>
+    <h1>EstimaFood Print</h1>
+    <div class="sub">Configure a URL do seu sistema para começar</div>
+
+    <label>URL do seu sistema EstimaFood</label>
+    <input type="url" id="url" placeholder="https://seu-sistema.fly.dev" autofocus
+      onkeydown="if(event.key==='Enter')connect()">
+
+    <button class="btn" id="btn" onclick="connect()">
+      Conectar
+    </button>
+
+    <div class="status" id="status"></div>
+
+    <div class="hint">
+      Cole a URL completa do seu sistema (ex: https://meu-restaurante.fly.dev)<br>
+      Após conectar, o app carregará automaticamente na próxima vez.
+    </div>
+  </div>
+
+  <script>
+    async function connect() {
+      const url = document.getElementById('url').value.trim();
+      const status = document.getElementById('status');
+      const btn = document.getElementById('btn');
+
+      if (!url) { status.textContent = 'Digite a URL'; status.className = 'status err'; return; }
+      if (!url.startsWith('http')) { status.textContent = 'URL deve começar com http:// ou https://'; status.className = 'status err'; return; }
+
+      btn.disabled = true;
+      btn.textContent = 'Conectando...';
+      status.textContent = '';
+
+      try {
+        // Testa se a URL está acessível
+        const r = await fetch(url, { mode: 'no-cors', signal: AbortSignal.timeout(8000) });
+        
+        // Salva e redireciona
+        await window.ElectronPrint.setServerUrl(url);
+        status.textContent = '✅ Conectado! Carregando...';
+        status.className = 'status ok';
+      } catch (e) {
+        // Tenta salvar mesmo assim (pode ser CORS)
+        try {
+          await window.ElectronPrint.setServerUrl(url);
+          status.textContent = '✅ URL salva! Carregando...';
+          status.className = 'status ok';
+        } catch (e2) {
+          status.textContent = '❌ Erro: ' + e2.message;
+          status.className = 'status err';
+          btn.disabled = false;
+          btn.textContent = 'Conectar';
+        }
+      }
+    }
+  </script>
+</body>
+</html>

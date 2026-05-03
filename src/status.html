@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>EstimaFood Print — Status</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0a0a0f;
+      color: #e4e4e7;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      user-select: none;
+    }
+    .card {
+      background: linear-gradient(145deg, #18181b 0%, #1a1a22 100%);
+      border: 1px solid #27272a;
+      border-radius: 20px;
+      padding: 32px;
+      width: 380px;
+      max-width: 92vw;
+    }
+
+    /* ── Header ── */
+    .header { text-align: center; margin-bottom: 24px; }
+    .header .icon { font-size: 38px; margin-bottom: 6px; }
+    .header h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
+    .header .version { font-size: 11px; color: #52525b; margin-top: 2px; }
+
+    /* ── Status Badge ── */
+    .status-badge {
+      display: flex; align-items: center; gap: 10px;
+      background: #111114; border: 1px solid #27272a; border-radius: 12px;
+      padding: 14px 16px; margin-bottom: 20px;
+    }
+    .status-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .status-dot.online { background: #22c55e; box-shadow: 0 0 8px #22c55e88; animation: pulse 2s infinite; }
+    .status-dot.offline { background: #ef4444; box-shadow: 0 0 8px #ef444488; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    .status-info { flex: 1; }
+    .status-info .label { font-size: 13px; font-weight: 600; }
+    .status-info .detail { font-size: 11px; color: #71717a; margin-top: 1px; }
+
+    /* ── Stats Row ── */
+    .stats {
+      display: flex; gap: 10px; margin-bottom: 20px;
+    }
+    .stat {
+      flex: 1; text-align: center;
+      background: #111114; border: 1px solid #27272a; border-radius: 10px;
+      padding: 12px 8px;
+    }
+    .stat .num { font-size: 22px; font-weight: 700; color: #3b82f6; }
+    .stat .lbl { font-size: 10px; color: #71717a; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+
+    /* ── Config Section ── */
+    .section-title {
+      font-size: 11px; font-weight: 600; color: #71717a;
+      text-transform: uppercase; letter-spacing: 0.8px;
+      margin-bottom: 10px; padding-left: 2px;
+    }
+    .config-group { margin-bottom: 18px; }
+
+    select, input[type="text"] {
+      width: 100%; padding: 11px 14px;
+      background: #111114; border: 1px solid #27272a;
+      border-radius: 10px; color: #e4e4e7;
+      font-size: 13px; font-family: inherit;
+      outline: none; cursor: pointer;
+      transition: border-color 0.2s;
+      appearance: none;
+      -webkit-appearance: none;
+    }
+    select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2371717a' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px; }
+    select:focus, input[type="text"]:focus { border-color: #3b82f6; }
+    select option { background: #18181b; color: #e4e4e7; }
+
+    .radio-row {
+      display: flex; gap: 8px;
+    }
+    .radio-opt {
+      flex: 1; text-align: center;
+      padding: 10px; border-radius: 10px;
+      border: 1px solid #27272a; background: #111114;
+      font-size: 13px; font-weight: 500; cursor: pointer;
+      transition: all 0.2s;
+    }
+    .radio-opt.active { border-color: #3b82f6; background: #3b82f620; color: #60a5fa; }
+    .radio-opt:hover:not(.active) { border-color: #3f3f46; }
+
+    /* ── Buttons ── */
+    .btn-row { display: flex; gap: 8px; margin-top: 6px; margin-bottom: 14px; }
+    .btn {
+      flex: 1; padding: 11px 8px;
+      border: 1px solid #27272a; border-radius: 10px;
+      background: #111114; color: #e4e4e7;
+      font-size: 12px; font-weight: 600; font-family: inherit;
+      cursor: pointer; transition: all 0.2s;
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+    }
+    .btn:hover { border-color: #3f3f46; background: #1c1c22; }
+    .btn.primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+    .btn.primary:hover { background: #2563eb; }
+    .btn.danger { color: #f87171; }
+    .btn.danger:hover { background: #7f1d1d20; border-color: #7f1d1d; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── Footer ── */
+    .footer {
+      text-align: center; font-size: 10px; color: #3f3f46;
+      padding-top: 10px; border-top: 1px solid #1e1e24;
+    }
+    .footer a { color: #52525b; cursor: pointer; text-decoration: underline; }
+    .footer a:hover { color: #71717a; }
+
+    /* ── Toast ── */
+    .toast {
+      position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+      background: #22c55e; color: #000; padding: 10px 20px;
+      border-radius: 10px; font-size: 13px; font-weight: 600;
+      opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 99;
+    }
+    .toast.show { opacity: 1; }
+    .toast.error { background: #ef4444; color: #fff; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <!-- Header -->
+    <div class="header">
+      <div class="icon">🖨️</div>
+      <h1>EstimaFood Print</h1>
+      <div class="version" id="appVersion">v0.0.0</div>
+    </div>
+
+    <!-- Status -->
+    <div class="status-badge">
+      <div class="status-dot" id="statusDot"></div>
+      <div class="status-info">
+        <div class="label" id="statusLabel">Verificando...</div>
+        <div class="detail" id="statusDetail"></div>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats">
+      <div class="stat">
+        <div class="num" id="jobCount">0</div>
+        <div class="lbl">Impressões</div>
+      </div>
+      <div class="stat">
+        <div class="num" id="lastPrint">--:--</div>
+        <div class="lbl">Última</div>
+      </div>
+    </div>
+
+    <!-- Printer Config -->
+    <div class="config-group">
+      <div class="section-title">🖨️ Impressora</div>
+      <select id="printerSelect">
+        <option value="">Padrão do sistema</option>
+      </select>
+    </div>
+
+    <!-- Paper Width -->
+    <div class="config-group">
+      <div class="section-title">📄 Largura do Papel</div>
+      <div class="radio-row">
+        <div class="radio-opt" data-value="58" onclick="setPaper(58)">58mm</div>
+        <div class="radio-opt" data-value="80" onclick="setPaper(80)">80mm</div>
+      </div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="btn-row">
+      <button class="btn primary" onclick="testPrint()" id="btnTest">
+        🖨️ Teste
+      </button>
+      <button class="btn" onclick="reconnect()">
+        🔄 Reconectar
+      </button>
+      <button class="btn danger" onclick="logout()">
+        🚪 Sair
+      </button>
+    </div>
+
+    <!-- Auto-start -->
+    <div class="config-group" style="margin-bottom:8px">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:0 2px">
+        <span style="font-size:12px;color:#a1a1aa">Iniciar com Windows</span>
+        <label style="position:relative;width:40px;height:22px;cursor:pointer">
+          <input type="checkbox" id="autoStartToggle" onchange="toggleAutoStart()"
+            style="opacity:0;width:0;height:0;position:absolute">
+          <span style="position:absolute;inset:0;background:#27272a;border-radius:11px;transition:0.3s"></span>
+          <span id="autoStartKnob" style="position:absolute;top:2px;left:2px;width:18px;height:18px;background:#71717a;border-radius:50%;transition:0.3s"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      Serviço de impressão em segundo plano &bull;
+      <a onclick="minimize()">Minimizar</a>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const EP = window.ElectronPrint;
+    let _paperWidth = 80;
+
+    // ── Init ──
+    async function init() {
+      // Version
+      try {
+        const v = await EP.version();
+        document.getElementById('appVersion').textContent = 'v' + v;
+      } catch {}
+
+      // Status
+      try {
+        const st = await EP.getStatus();
+        const dot = document.getElementById('statusDot');
+        const label = document.getElementById('statusLabel');
+        const detail = document.getElementById('statusDetail');
+        if (st.connected) {
+          dot.className = 'status-dot online';
+          label.textContent = '● Conectado';
+          detail.textContent = st.nome || 'Serviço ativo';
+        } else {
+          dot.className = 'status-dot offline';
+          label.textContent = '● Desconectado';
+          detail.textContent = 'Sem tenant configurado';
+        }
+        document.getElementById('jobCount').textContent = st.jobCount || '0';
+        document.getElementById('lastPrint').textContent = st.lastPrint || '--:--';
+      } catch {}
+
+      // Printer config
+      try {
+        const cfg = await EP.getConfig();
+        _paperWidth = cfg.paperWidth || 80;
+
+        // Populate printers
+        const sel = document.getElementById('printerSelect');
+        const printers = cfg.printers || [];
+        printers.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p; opt.textContent = p;
+          if (p === cfg.printer) opt.selected = true;
+          sel.appendChild(opt);
+        });
+
+        // Paper radio
+        document.querySelectorAll('.radio-opt').forEach(el => {
+          el.classList.toggle('active', parseInt(el.dataset.value) === _paperWidth);
+        });
+
+        // Printer change handler
+        sel.addEventListener('change', async () => {
+          await EP.saveConfig({ printer: sel.value });
+          toast('Impressora salva!');
+        });
+      } catch {}
+
+      // Auto-start
+      try {
+        const as = await EP.getAutoStart();
+        const toggle = document.getElementById('autoStartToggle');
+        const knob = document.getElementById('autoStartKnob');
+        toggle.checked = as.enabled;
+        if (as.enabled) {
+          knob.style.left = '20px';
+          knob.style.background = '#3b82f6';
+          knob.parentElement.querySelector('span:nth-child(2)').style.background = '#3b82f640';
+        }
+      } catch {}
+    }
+
+    function setPaper(w) {
+      _paperWidth = w;
+      document.querySelectorAll('.radio-opt').forEach(el => {
+        el.classList.toggle('active', parseInt(el.dataset.value) === w);
+      });
+      EP.saveConfig({ paperWidth: w });
+      toast('Papel: ' + w + 'mm');
+    }
+
+    async function testPrint() {
+      const btn = document.getElementById('btnTest');
+      btn.disabled = true; btn.textContent = '⏳ Imprimindo...';
+      try {
+        const order = {
+          id: 'TESTE', num: 'TESTE',
+          client: 'Teste de Impressão',
+          items: [
+            { qty: 2, name: 'X-Burguer', price: 22.50 },
+            { qty: 1, name: 'Coca-Cola 600ml', price: 8.00 }
+          ],
+          total: 53.00, taxa: 0, pag: 'Dinheiro'
+        };
+        const r = await EP.printOrder(order);
+        toast(r.ok ? '✅ Teste impresso!' : '❌ ' + (r.error || 'Erro'), !r.ok);
+      } catch (e) {
+        toast('❌ ' + e.message, true);
+      }
+      btn.disabled = false; btn.innerHTML = '🖨️ Teste';
+    }
+
+    async function reconnect() {
+      toast('🔄 Reconectando...');
+      try { await EP.restart(); } catch {}
+    }
+
+    async function logout() {
+      if (!confirm('Desconectar? Você precisará fazer login novamente.')) return;
+      try {
+        await EP.clearSession();
+        await EP.logout();
+      } catch {}
+    }
+
+    async function toggleAutoStart() {
+      const toggle = document.getElementById('autoStartToggle');
+      const knob = document.getElementById('autoStartKnob');
+      const enabled = toggle.checked;
+      await EP.setAutoStart(enabled);
+      knob.style.left = enabled ? '20px' : '2px';
+      knob.style.background = enabled ? '#3b82f6' : '#71717a';
+      knob.parentElement.querySelector('span:nth-child(2)').style.background = enabled ? '#3b82f640' : '#27272a';
+      toast(enabled ? 'Auto-start ativado' : 'Auto-start desativado');
+    }
+
+    function minimize() {
+      try { EP.hideWindow(); } catch {}
+    }
+
+    function toast(msg, err) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.className = 'toast show' + (err ? ' error' : '');
+      setTimeout(() => el.className = 'toast', 2500);
+    }
+
+    init();
+  </script>
+</body>
+</html>

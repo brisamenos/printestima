@@ -1,0 +1,90 @@
+{
+  "name": "estimafood-print",
+  "version": "2.0.0",
+  "description": "EstimaFood Print — Serviço de Impressão em Segundo Plano",
+  "main": "src/main.js",
+  "author": "EstimaFood",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "cross-env NODE_ENV=development electron .",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win --publish always",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux",
+    "postinstall": "electron-builder install-app-deps || true"
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0",
+    "electron-updater": "^6.3.9",
+    "pdf-to-printer": "^5.6.0"
+  },
+  "optionalDependencies": {
+    "escpos": "^3.0.0-alpha.6",
+    "escpos-usb": "^3.0.0-alpha.4",
+    "escpos-network": "^3.0.0-alpha.4",
+    "usb": "^2.14.0"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "cross-env": "^7.0.3"
+  },
+  "build": {
+    "appId": "com.estimafood.print",
+    "productName": "EstimaFood Print",
+    "artifactName": "EstimaFoodPrint-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "EstimaFood Print",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerSidebar": null,
+      "runAfterFinish": true
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "icon": "assets/icon.png",
+      "category": "public.app-category.business"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "icon": "assets/icon.png",
+      "category": "Office"
+    },
+    "publish": {
+      "provider": "github",
+      "releaseType": "release"
+    }
+  }
+}
