@@ -1,7 +1,7 @@
 {
-  "name": "estimafood-print",
+  "name": "estimafood-print-2",
   "version": "2.0.4",
-  "description": "PrintEstima Web — Serviço de Impressão em Segundo Plano",
+  "description": "PrintEstima Web 2 — Serviço de Impressão em Segundo Plano",
   "main": "src/main.js",
   "author": "EstimaFood",
   "license": "MIT",
@@ -9,7 +9,8 @@
     "start": "electron .",
     "dev": "cross-env NODE_ENV=development electron .",
     "build": "electron-builder",
-    "build:win": "electron-builder --win --publish always",
+    "build:win": "electron-builder --win --publish never",
+    "release:win": "electron-builder --win --publish always",
     "build:mac": "electron-builder --mac",
     "build:linux": "electron-builder --linux",
     "postinstall": "electron-builder install-app-deps || true"
@@ -31,9 +32,9 @@
     "cross-env": "^7.0.3"
   },
   "build": {
-    "appId": "com.estimafood.print",
-    "productName": "PrintEstima Web",
-    "artifactName": "PrintEstimaWeb-${version}-${os}-${arch}.${ext}",
+    "appId": "com.estimafood.print2",
+    "productName": "PrintEstima Web 2",
+    "artifactName": "PrintEstimaWeb2-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "dist",
       "buildResources": "assets"
@@ -61,7 +62,7 @@
       "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "PrintEstima Web",
+      "shortcutName": "PrintEstima Web 2",
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "installerSidebar": null,
@@ -81,10 +82,6 @@
       ],
       "icon": "assets/icon.png",
       "category": "Office"
-    },
-    "publish": {
-      "provider": "github",
-      "releaseType": "release"
     }
   }
 }

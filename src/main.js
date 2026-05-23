@@ -10,6 +10,17 @@ const fs = require('fs');
 const os = require('os');
 const Store = require('electron-store');
 
+const APP_ID = 'com.estimafood.print2';
+const APP_DISPLAY_NAME = 'PrintEstima Web 2';
+const APP_REG_NAME = 'EstimaFoodPrint2';
+const APP_AGENT_NAME = 'EstimaFoodPrint2';
+const APP_ENABLE_UPDATER = false;
+
+app.setName(APP_DISPLAY_NAME);
+if (process.platform === 'win32') {
+  app.setAppUserModelId(APP_ID);
+}
+
 // ── Flags de inicialização (precisam vir ANTES do app.whenReady) ──
 // Desativa throttling de timers em janela escondida — sem isso, o polling
 // do print-queue PARA quando o app fica minimizado/em segundo plano e
@@ -91,7 +102,7 @@ function createWindow() {
     maxWidth: 500,
     resizable: false,
     icon: getIcon(),
-    title: 'PrintEstima Web',
+    title: APP_DISPLAY_NAME,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -297,7 +308,7 @@ function createTray() {
     }
   ]);
 
-  tray.setToolTip('PrintEstima Web — Serviço de Impressão');
+  tray.setToolTip(`${APP_DISPLAY_NAME} — Serviço de Impressão`);
   tray.setContextMenu(contextMenu);
   tray.on('double-click', () => showStatusPage());
 }
@@ -1294,7 +1305,7 @@ function startPrintQueuePolling() {
     if (!_pqActive) return;
     const tid = _pqGetTenantId();
     if (!tid) return;
-    _pqRequest('POST', baseUrl, '/api/print-queue/heartbeat', tid, { printer: 'EstimaFoodPrint' }).catch(() => {});
+    _pqRequest('POST', baseUrl, '/api/print-queue/heartbeat', tid, { printer: APP_AGENT_NAME }).catch(() => {});
   };
   hb();
   _pqHbTimer = setInterval(hb, 30000);
@@ -1374,7 +1385,7 @@ ipcMain.handle('print:setTenantId', (_e, tid) => {
     log('🫥 Login detectado! Minimizando para bandeja...');
     if (Notification.isSupported()) {
       new Notification({
-        title: 'PrintEstima Web',
+        title: APP_DISPLAY_NAME,
         body: '✅ Serviço de impressão ativo! O app está na bandeja do sistema.',
         icon: getIcon(),
       }).show();
@@ -1440,7 +1451,7 @@ function setupUpdater() {
       log('📦 Atualização disponível:', info.version);
       if (Notification.isSupported()) {
         new Notification({
-          title: 'PrintEstima Web',
+          title: APP_DISPLAY_NAME,
           body: `Baixando versão ${info.version}...`,
           icon: getIcon(),
         }).show();
@@ -1459,7 +1470,7 @@ function setupUpdater() {
       log('✅ Atualização baixada:', info.version, '— instalando em 10s...');
       if (Notification.isSupported()) {
         new Notification({
-          title: 'PrintEstima Web',
+          title: APP_DISPLAY_NAME,
           body: `Versão ${info.version} pronta! Reiniciando em 10 segundos...`,
           icon: getIcon(),
         }).show();
@@ -1493,7 +1504,7 @@ function setupUpdater() {
 // silenciosamente em Windows com política de grupo ou antivírus agressivo,
 // e pode usar um nome de chave diferente do nosso ("EstimaFood Print" vs
 // "EstimaFoodPrint"), deixando entrada obsoleta no registry após updates.
-const REG_NAME = 'EstimaFoodPrint';
+const REG_NAME = APP_REG_NAME;
 
 function _applyRegistryAutoStart(enabled, exePath) {
   return new Promise((resolve) => {
@@ -1512,7 +1523,7 @@ function _applyRegistryAutoStart(enabled, exePath) {
       // com nome diferente (produto: "EstimaFood Print") para garantir disable total.
       psScript = [
         `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${REG_NAME}' -ErrorAction SilentlyContinue`,
-        `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'PrintEstima Web' -ErrorAction SilentlyContinue`,
+        `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${APP_DISPLAY_NAME}' -ErrorAction SilentlyContinue`,
       ].join('; ');
     }
     // -EncodedCommand recebe UTF-16LE em base64 — bypassa o quoting do cmd.exe
@@ -1641,14 +1652,14 @@ if (!gotLock) {
     startPrintQueuePolling(); // Inicia polling do print-queue
 
     // Auto-updater só em produção
-    if (!isDev) setupUpdater();
+    if (!isDev && APP_ENABLE_UPDATER) setupUpdater();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
       else if (mainWindow) { mainWindow.show(); mainWindow.focus(); mainWindow.webContents.focus(); }
     });
 
-    log('✅ PrintEstima Web iniciado | versão:', app.getVersion());
+    log(`✅ ${APP_DISPLAY_NAME} iniciado | versão:`, app.getVersion());
   });
 
   app.on('before-quit', () => { isQuitting = true; });
