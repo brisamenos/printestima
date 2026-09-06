@@ -1,6 +1,6 @@
 {
   "name": "estimafood-print-win7",
-  "version": "1.10.34",
+  "version": "1.10.35",
   "description": "EstimaFood — Impressão Automática para Restaurantes (compatível com Windows 7/8/8.1)",
   "main": "src/main.js",
   "author": "EstimaFood",
