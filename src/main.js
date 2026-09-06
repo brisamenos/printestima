@@ -4,22 +4,11 @@
  * ║  Impressão 100% silenciosa para impressoras térmicas    ║
  * ╚══════════════════════════════════════════════════════════╝
  */
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, Notification, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, Notification, dialog, shell, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const Store = require('electron-store');
-
-const APP_ID = 'com.estimafood.print2';
-const APP_DISPLAY_NAME = 'PrintEstima Web 2';
-const APP_REG_NAME = 'EstimaFoodPrint2';
-const APP_AGENT_NAME = 'EstimaFoodPrint2';
-const APP_ENABLE_UPDATER = false;
-
-app.setName(APP_DISPLAY_NAME);
-if (process.platform === 'win32') {
-  app.setAppUserModelId(APP_ID);
-}
 
 // ── Flags de inicialização (precisam vir ANTES do app.whenReady) ──
 // Desativa throttling de timers em janela escondida — sem isso, o polling
@@ -28,8 +17,14 @@ if (process.platform === 'win32') {
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
-// Reduz uso de memória em PCs com pouca RAM (lojas usam PCs simples)
-app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+// Combina todas as features desativadas numa única chamada —
+// múltiplos appendSwitch para o mesmo flag se sobrescrevem no Chromium
+app.commandLine.appendSwitch('disable-features', [
+  'CalculateNativeWinOcclusion',   // Reduz uso de memória em PCs simples
+  'WinUseBrowserSpellChecker',     // Fix: spell checker nativo interfere com IME e trava teclado
+].join(','));
+// Fix input travado em Windows mais antigos (7/8/10 LTSC)
+app.commandLine.appendSwitch('disable-gpu-sandbox');
 
 // ── Config persistente ──────────────────────────────────────
 const store = new Store({
@@ -48,7 +43,7 @@ const store = new Store({
     printMethod: 'electron', // 'electron' | 'escpos-usb' | 'escpos-network'
     networkPrinterIp: '',
     networkPrinterPort: 9100,
-    windowBounds: { width: 420, height: 600 },
+    windowBounds: { width: 1280, height: 800 },
     disableGpu: false, // usuário pode ligar manualmente se PC antigo trava
   }
 });
@@ -62,9 +57,7 @@ if (store.get('disableGpu')) {
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
-let _pqJobCount = 0;
-let _pqLastPrint = '';
-let _loginDone = false; // true após tenant configurado
+let pendingUpdateInstall = null; // versão de update baixada mas adiada até o login terminar
 
 // ── Helpers ─────────────────────────────────────────────────
 const isDev = process.env.NODE_ENV === 'development';
@@ -92,17 +85,83 @@ process.on('uncaughtException', (err) => {
   try { log('⚠️ uncaughtException:', err && err.message ? err.message : err); } catch {}
 });
 
+// ── Força foco real do Windows (fix teclado travado) ─────────
+// Problema: em muitos notebooks, quando a janela é mostrada por código
+// (auto-start, tray, instância secundária, ready-to-show), o Windows nega
+// silenciosamente o "foreground focus" real por segurança (SetForegroundWindow
+// lock) — a janela aparece na frente e o mouse funciona, mas o teclado não
+// vai pra ela. Só um clique manual do usuário na barra de tarefas resolve,
+// por isso "fechar e abrir de novo" parecia corrigir.
+// Fix: minimizar e restaurar força o Windows a tratar como uma ativação
+// legítima (equivalente a clicar na barra de tarefas), transferindo o foco
+// de teclado de verdade — não só o foco visual do Electron.
+function forceRealFocus(win) {
+  if (!win || win.isDestroyed()) return;
+  if (_forcingFocus) return; // trava de reentrância — evita loop de minimize/restore
+  if (process.platform === 'win32') {
+    _forcingFocus = true;
+    try {
+      win.minimize();
+      setTimeout(() => {
+        if (!win || win.isDestroyed()) { _forcingFocus = false; return; }
+        win.restore();
+        win.setAlwaysOnTop(true);
+        win.focus();
+        win.webContents.focus();
+        setTimeout(() => {
+          _forcingFocus = false;
+          if (!win || win.isDestroyed()) return;
+          win.setAlwaysOnTop(false);
+          win.webContents.focus();
+        }, 120);
+      }, 80);
+    } catch (e) {
+      _forcingFocus = false;
+      win.show(); win.focus(); win.webContents.focus();
+    }
+  } else {
+    win.show();
+    win.focus();
+    win.webContents.focus();
+  }
+}
+let _forcingFocus = false;
+
+// ── Restaura foco de teclado após eventos que podem "roubá-lo" ─
+// Esse é um bug conhecido e antigo do Electron/Chromium NO WINDOWS
+// (electron/electron#20464 e outros): BrowserWindow.isFocused() pode dizer
+// que a janela está em foco, o campo de texto mostra o cursor piscando, mas
+// o teclado real do Windows não está de fato entregue pra ela — só um clique
+// manual do usuário na barra de tarefas "repara" isso de verdade.
+// Qualquer janela nova criada pelo processo principal (mesmo oculta, como as
+// de impressão), qualquer notificação nativa, ou até o próprio Windows sem
+// motivo aparente, pode disparar esse desalinhamento. Por isso NÃO é preciso
+// estar imprimindo pra travar — impressão é só um dos vários gatilhos.
+// Não existe correção 100% garantida do lado do app (é bug do Chromium), mas
+// forçar minimize+restore é o único truque que convence o Windows a tratar
+// como ativação legítima e devolver o foco de teclado de verdade. Chamamos
+// isso depois de toda impressão, toda notificação nativa, e disponibilizamos
+// também via atalho manual (Ctrl+Alt+K) e menu da bandeja pra correção
+// instantânea sem precisar fechar e reabrir o app inteiro.
+function restoreKeyboardFocus() {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!mainWindow.isVisible() || mainWindow.isMinimized()) return; // não mexe se estiver na bandeja
+    forceRealFocus(mainWindow);
+  } catch {}
+}
+
 // ── Janela principal ────────────────────────────────────────
 function createWindow() {
+  const bounds = store.get('windowBounds');
+
   mainWindow = new BrowserWindow({
-    width: 420,
-    height: 600,
-    minWidth: 380,
-    minHeight: 500,
-    maxWidth: 500,
-    resizable: false,
+    width: bounds.width || 1280,
+    height: bounds.height || 800,
+    minWidth: 900,
+    minHeight: 600,
     icon: getIcon(),
-    title: APP_DISPLAY_NAME,
+    title: 'EstimaFood ' + app.getVersion(),
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -110,59 +169,136 @@ function createWindow() {
       nodeIntegration: false,
       webSecurity: true,
       spellcheck: false,
+      backgroundThrottling: false, // Fix: evita que input trave quando janela perde foco
     },
     show: false,
   });
 
+  // Mantém a versão sempre visível no título, mesmo quando a página web
+  // (gestor.html) tenta trocar o document.title por conta própria.
+  mainWindow.on('page-title-updated', (e, title) => {
+    e.preventDefault();
+    mainWindow.setTitle('EstimaFood ' + app.getVersion());
+  });
+
+  // Remove menu bar
   mainWindow.setMenuBarVisibility(false);
 
+  // Carrega URL do servidor ou tela de setup
   const serverUrl = store.get('serverUrl');
-  const hasTenant = !!store.get('_pqTenantId');
-  const startedHidden = process.argv.includes('--hidden');
+  if (serverUrl) {
+    log('🌐 Carregando:', serverUrl);
 
-  if (!serverUrl) {
-    // Primeira vez: pede URL do servidor
-    mainWindow.loadFile(path.join(__dirname, 'setup.html'));
-  } else if (hasTenant && startedHidden) {
-    // Já logado + iniciou com Windows → fica na tray, carrega status
-    _loginDone = true;
-    log('🫥 Iniciado com --hidden, tenant salvo. Direto na bandeja.');
-    mainWindow.loadFile(path.join(__dirname, 'status.html'));
-    return; // Não mostra janela
-  } else if (hasTenant) {
-    // Já logado, aberto manualmente → mostra status
-    _loginDone = true;
-    log('✅ Tenant salvo. Mostrando status.');
-    mainWindow.loadFile(path.join(__dirname, 'status.html'));
+    // ── Auto-login: restaura sessão se cair em login.html ──
+    // Estratégia: escuta did-finish-load em TODA navegação (sem .once), mas
+    // a flag _sessionApplied garante que só aplicamos uma vez. Isso é
+    // necessário porque o redirect gestor.html → login.html acontece DEPOIS
+    // do primeiro did-finish-load (gestor-core.js detecta sessão vazia e
+    // só aí redireciona). Se usássemos .once, perderíamos o evento do login.
+    //
+    // Diferença vs versão antiga: a antiga usava dom-ready e rodava
+    // executeJavaScript em TODA navegação independente da URL — isso
+    // bloqueava teclado em PCs lentos. Aqui só rodamos código se a URL
+    // contém login.html, e marcamos _sessionApplied=true imediatamente.
+    const savedSession = store.get('_savedSession');
+    let _sessionApplied = false;
+    if (savedSession) {
+      const age = Date.now() - (savedSession.ts || 0);
+      if (age >= 30 * 24 * 60 * 60 * 1000) {
+        store.delete('_savedSession');
+      } else {
+        log('[SESSION] Sessão salva encontrada:', savedSession.nome || '?');
+        const applySession = () => {
+          if (_sessionApplied || !mainWindow || mainWindow.isDestroyed()) return;
+          const currentUrl = mainWindow.webContents.getURL();
+          if (!currentUrl.includes('login.html')) return; // ainda não chegou no login
+          const ss = store.get('_savedSession');
+          if (!ss || (Date.now() - (ss.ts || 0)) >= 30 * 24 * 60 * 60 * 1000) return;
+          _sessionApplied = true;
+          log('[SESSION] Restaurando sessão e voltando pro gestor');
+          const ssStr = JSON.stringify(JSON.stringify(ss));
+          mainWindow.webContents.executeJavaScript(
+            'try{sessionStorage.setItem("sys_session",' + ssStr + ');window.location.replace("' + serverUrl + '")}catch(e){}'
+          ).catch(() => {});
+        };
+        // Escuta EM TODA navegação (sem .once). A flag _sessionApplied
+        // garante que executamos uma única vez quando cairmos em login.html.
+        mainWindow.webContents.on('did-finish-load', applySession);
+      }
+    }
+
+    // Tenta carregar com retry antes de mostrar tela offline
+    const tryLoad = (attempt = 1, maxAttempts = 5, delay = 3000) => {
+      log(`🌐 Tentativa ${attempt}/${maxAttempts}: ${serverUrl}`);
+      mainWindow.loadURL(serverUrl).catch(err => {
+        log(`❌ Tentativa ${attempt} falhou:`, err.message);
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        if (attempt < maxAttempts) {
+          log(`⏳ Aguardando ${delay / 1000}s antes da próxima tentativa...`);
+          setTimeout(() => tryLoad(attempt + 1, maxAttempts, Math.min(delay * 1.5, 15000)), delay);
+        } else {
+          log('❌ Todas as tentativas falharam. Mostrando tela offline.');
+          mainWindow.loadFile(path.join(__dirname, 'offline.html'));
+        }
+      });
+    };
+
+    // Também trata did-fail-load (erros de página que não rejeitam a Promise)
+    mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
+      if (!url || url.startsWith('file://') || url === 'about:blank') return;
+      log(`⚠️ did-fail-load: ${code} ${desc} — ${url}`);
+    });
+
+    tryLoad();
   } else {
-    // Tem URL mas sem tenant → precisa logar
-    loadLoginPage();
+    mainWindow.loadFile(path.join(__dirname, 'setup.html'));
   }
 
+  // Show when ready (mas respeita --hidden quando iniciado com Windows)
+  const startedHidden = process.argv.includes('--hidden');
   mainWindow.once('ready-to-show', () => {
-    if (startedHidden && hasTenant) return; // fica oculto
+    if (startedHidden) {
+      log('🫥 Iniciado com --hidden, ficando na bandeja');
+      return;
+    }
+    // Aqui NÃO usa forceRealFocus (minimize/restore): esse é o primeiro
+    // show, a página ainda pode estar carregando/pintando a tela, e o
+    // minimize() nesse momento pausa a renderização — causava tela em
+    // branco / carregamento lento. O truque pesado só é necessário quando
+    // a janela é reaberta em segundo plano (bandeja, segunda instância),
+    // com o conteúdo já carregado.
     mainWindow.show();
     mainWindow.focus();
     mainWindow.webContents.focus();
     if (isDev) mainWindow.webContents.openDevTools();
   });
 
-  mainWindow.on('show', () => {
-    setTimeout(() => {
+  // Fix global: sempre que o app receber foco (alt+tab, clique na taskbar, etc)
+  // garante que o webContents também está focado — previne teclado travado
+  // NOTA: removido daqui pois app.on acumula listeners se createWindow for chamado
+  // mais de uma vez. Handler foi movido para o bloco whenReady (abaixo).
+
+  // Save window bounds (com debounce — antes salvava em cada pixel de resize)
+  let _boundsTimer = null;
+  mainWindow.on('resize', () => {
+    if (_boundsTimer) clearTimeout(_boundsTimer);
+    _boundsTimer = setTimeout(() => {
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.focus();
-        mainWindow.webContents.focus();
+        const [w, h] = mainWindow.getSize();
+        store.set('windowBounds', { width: w, height: h });
       }
-    }, 100);
+    }, 500);
   });
 
-  mainWindow.on('restore', () => {
-    setTimeout(() => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.focus();
-        mainWindow.webContents.focus();
-      }
-    }, 100);
+  // Fix: garante foco no webContents ao ganhar foco (alt+tab, taskbar, etc)
+  // NOTA: NÃO usa forceRealFocus (minimize/restore) aqui — 'show' e 'restore'
+  // são disparados pelo próprio forceRealFocus quando ele é chamado nos pontos
+  // certos (tray, second-instance, ready-to-show), então reagir a esses
+  // eventos aqui causava um loop infinito de minimizar/restaurar (a tela
+  // ficava piscando sem parar).
+  mainWindow.on('focus', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.focus();
   });
 
   // Minimizar para tray em vez de fechar
@@ -176,92 +312,69 @@ function createWindow() {
 
   mainWindow.on('closed', () => { mainWindow = null; });
 
+  // Links externos abrem no navegador
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('http')) shell.openExternal(url);
     return { action: 'deny' };
   });
 
-  // Inject CSS para esconder elementos desnecessários + overlay no gestor
+  // Inject CSS para esconder elementos web desnecessários no desktop
   mainWindow.webContents.on('did-finish-load', () => {
-    const url = mainWindow.webContents.getURL();
+    // ── Fix teclado travado — causa raiz mais provável ────────────────
+    // Bug documentado do Electron no Windows (electron/electron#20821):
+    // toda vez que a página chama window.confirm()/alert()/prompt() —
+    // as caixinhas nativas "Tem certeza?" — o Windows pode NÃO devolver
+    // o foco de teclado real pra janela quando o diálogo fecha, mesmo
+    // ela continuando visível/clicável. O Anotaí usa confirm() em
+    // dezenas de telas diferentes (cancelar pedido, excluir item,
+    // excluir mesa, etc.) — provavelmente o gatilho mais frequente de
+    // todos, e explica por que trava em "várias ferramentas".
+    // Não precisamos mudar nada no código do Anotaí: interceptamos
+    // window.alert/confirm/prompt aqui, no "mundo principal" da página
+    // (executeJavaScript roda lá, diferente do preload que fica isolado),
+    // e avisamos o processo principal assim que o diálogo fecha.
+    mainWindow.webContents.executeJavaScript(`
+      (function(){
+        if (window.__efDialogPatchApplied) return;
+        window.__efDialogPatchApplied = true;
+        ['alert','confirm','prompt'].forEach(function(fn){
+          var original = window[fn].bind(window);
+          window[fn] = function(){
+            var r = original.apply(window, arguments);
+            try { window.ElectronPrint && window.ElectronPrint._dialogClosed && window.ElectronPrint._dialogClosed(); } catch(e){}
+            return r;
+          };
+        });
+      })();
+    `).catch(() => {});
+
     mainWindow.webContents.insertCSS(`
       .pwa-install-banner, .update-toast { display: none !important; }
     `).catch(() => {});
 
-    // Se caiu no gestor.html após login → injeta overlay e espera tenant
-    if (url.includes('gestor.html') || url.includes('gestor-core')) {
-      mainWindow.webContents.insertCSS(`
-        body::after {
-          content: '🖨️ Conectando serviço de impressão...';
-          position: fixed; inset: 0; z-index: 999999;
-          display: flex; align-items: center; justify-content: center;
-          background: #0a0a0f; color: #e4e4e7;
-          font-family: -apple-system, sans-serif; font-size: 16px;
-        }
-      `).catch(() => {});
-    }
+    // Selo fixo com a versão do app — não depende do gestor.html, some
+    // sozinho se a página recarregar (reinjetado a cada did-finish-load).
+    const v = app.getVersion();
+    mainWindow.webContents.insertCSS(`
+      #ef-version-badge {
+        position: fixed; bottom: 6px; right: 8px; z-index: 999999;
+        font: 11px/1.4 -apple-system, Segoe UI, Arial, sans-serif;
+        color: #9aa0a6; background: rgba(255,255,255,.75);
+        padding: 1px 6px; border-radius: 4px; pointer-events: none;
+        user-select: none;
+      }
+    `).catch(() => {});
+    mainWindow.webContents.executeJavaScript(`
+      (function(){
+        var old = document.getElementById('ef-version-badge');
+        if (old) old.remove();
+        var b = document.createElement('div');
+        b.id = 'ef-version-badge';
+        b.textContent = 'v${v}';
+        document.body.appendChild(b);
+      })();
+    `).catch(() => {});
   });
-}
-
-// ── Carrega página de login do servidor ─────────────────────
-function loadLoginPage() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  const serverUrl = store.get('serverUrl') || '';
-  if (!serverUrl) return;
-
-  // Monta URL do login baseado na URL do servidor
-  let loginUrl;
-  try {
-    const u = new URL(serverUrl);
-    loginUrl = u.origin + '/login.html';
-  } catch {
-    loginUrl = serverUrl.replace(/\/[^\/]*$/, '/login.html');
-  }
-
-  log('🔑 Carregando login:', loginUrl);
-
-  // Restaura sessão se existir (auto-login)
-  const savedSession = store.get('_savedSession');
-  if (savedSession) {
-    const age = Date.now() - (savedSession.ts || 0);
-    if (age >= 30 * 24 * 60 * 60 * 1000) {
-      store.delete('_savedSession');
-    } else {
-      let _sessionApplied = false;
-      mainWindow.webContents.on('did-finish-load', function _applySession() {
-        if (_sessionApplied || !mainWindow || mainWindow.isDestroyed()) return;
-        const currentUrl = mainWindow.webContents.getURL();
-        if (!currentUrl.includes('login.html')) return;
-        _sessionApplied = true;
-        const ssStr = JSON.stringify(JSON.stringify(savedSession));
-        mainWindow.webContents.executeJavaScript(
-          'try{sessionStorage.setItem("sys_session",' + ssStr + ');window.location.replace("' + serverUrl + '")}catch(e){}'
-        ).catch(() => {});
-      });
-    }
-  }
-
-  mainWindow.loadURL(loginUrl).catch(err => {
-    log('❌ Erro ao carregar login:', err.message);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.loadFile(path.join(__dirname, 'offline.html'));
-    }
-  });
-}
-
-// ── Mostra tela de status (chamada pelo tray) ───────────────
-function showStatusPage() {
-  if (!mainWindow) {
-    createWindow();
-  }
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    if (_loginDone) {
-      mainWindow.loadFile(path.join(__dirname, 'status.html'));
-    }
-    mainWindow.show();
-    mainWindow.focus();
-    mainWindow.webContents.focus();
-  }
 }
 
 // ── System Tray ─────────────────────────────────────────────
@@ -273,18 +386,17 @@ function createTray() {
     tray = new Tray(nativeImage.createEmpty());
   }
 
-  const tid = store.get('_pqTenantId');
-  const statusLabel = tid ? '🟢 Conectado' : '🔴 Desconectado';
-
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: '📋 Abrir Painel',
-      click: () => showStatusPage()
+      label: '📋 Abrir EstimaFood',
+      click: () => {
+        if (mainWindow) { mainWindow.show(); forceRealFocus(mainWindow); }
+        else createWindow();
+      }
     },
     { type: 'separator' },
-    { label: statusLabel, enabled: false },
     {
-      label: '🖨️ ' + (store.get('printer') || 'Impressora padrão'),
+      label: '🖨️ Impressora: ' + (store.get('printer') || 'Padrão do sistema'),
       enabled: false
     },
     {
@@ -293,8 +405,28 @@ function createTray() {
     },
     { type: 'separator' },
     {
-      label: '🔄 Reconectar',
-      click: () => { app.relaunch(); app.exit(0); }
+      label: '⚙️ Configurações',
+      click: () => {
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+          mainWindow.webContents.executeJavaScript(
+            "typeof nav==='function'&&nav('impressao')"
+          ).catch(() => {});
+        }
+      }
+    },
+    {
+      label: '⌨️ Corrigir teclado travado',
+      click: () => {
+        if (mainWindow) { mainWindow.show(); forceRealFocus(mainWindow); }
+      }
+    },
+    {
+      label: '🔄 Recarregar',
+      click: () => {
+        if (mainWindow) mainWindow.reload();
+      }
     },
     {
       label: '🔧 DevTools',
@@ -304,13 +436,18 @@ function createTray() {
     { type: 'separator' },
     {
       label: '❌ Sair',
-      click: () => { isQuitting = true; app.quit(); }
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
     }
   ]);
 
-  tray.setToolTip(`${APP_DISPLAY_NAME} — Serviço de Impressão`);
+  tray.setToolTip('EstimaFood ' + app.getVersion() + ' — Impressão Automática');
   tray.setContextMenu(contextMenu);
-  tray.on('double-click', () => showStatusPage());
+  tray.on('double-click', () => {
+    if (mainWindow) { mainWindow.show(); forceRealFocus(mainWindow); }
+  });
 }
 
 // ── Impressão silenciosa via Electron ───────────────────────
@@ -415,7 +552,15 @@ async function printSilentElectron(html, opts = {}) {
   const measureWinWidth = Math.round(widthMm / 25.4 * 96);
   const measureWin = new BrowserWindow({
     show: false, width: measureWinWidth, height: 4000,
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
+    // offscreen:true — a correção mais forte contra o teclado travado: essa
+    // opção faz o Electron NUNCA criar uma janela real do Windows (nenhum
+    // HWND) pra esse conteúdo — ele é renderizado só como bitmap em memória.
+    // Sem janela nativa, é estruturalmente impossível ela entrar na disputa
+    // de foco do Windows com a janela principal. focusable/skipTaskbar
+    // ficam como reforço, mas offscreen é o que resolve de verdade.
+    focusable: false,
+    skipTaskbar: true,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, offscreen: true },
   });
 
   let contentHeight;
@@ -454,7 +599,10 @@ async function printSilentElectron(html, opts = {}) {
 
   const printWin = new BrowserWindow({
     show: false, width: measureWinWidth, height: 2000,
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
+    // Mesmo motivo do measureWin acima — ver comentário lá.
+    focusable: false,
+    skipTaskbar: true,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, offscreen: true },
   });
 
   try {
@@ -492,8 +640,14 @@ async function printSilentElectron(html, opts = {}) {
       try {
         const ptpPath = require.resolve('pdf-to-printer');
         const ptpDir = path.dirname(ptpPath);
-        for (const p of [path.join(ptpDir,'SumatraPDF.exe'),path.join(ptpDir,'..','SumatraPDF.exe'),path.join(ptpDir,'SumatraPDF-3.4.6-64.exe'),path.join(ptpDir,'..','SumatraPDF-3.4.6-64.exe')]) {
-          if (fs.existsSync(p)) { sumatraPath = p; break; }
+        // O pdf-to-printer empacota um único binário (ex.: SumatraPDF-3.4.6-32.exe,
+        // que é 32-bit mesmo em builds x64 do app) — buscamos pelo prefixo em vez de
+        // um nome/versão fixos, para funcionar em qualquer arquitetura (x64 ou ia32).
+        for (const dir of [ptpDir, path.join(ptpDir, '..')]) {
+          try {
+            const found = fs.readdirSync(dir).find(f => /^SumatraPDF.*\.exe$/i.test(f));
+            if (found) { sumatraPath = path.join(dir, found); break; }
+          } catch {}
         }
       } catch {}
       if (!sumatraPath) {
@@ -518,12 +672,14 @@ async function printSilentElectron(html, opts = {}) {
 
     try { fs.unlinkSync(printFile); } catch {}
     setTimeout(() => { try { fs.unlinkSync(pdfFile); } catch {} }, 5000);
+    restoreKeyboardFocus();
     return { ok: true };
 
   } catch (e) {
     try { printWin.close(); } catch {}
     try { fs.unlinkSync(printFile); } catch {}
     log('❌ Impressão falhou:', e.message);
+    restoreKeyboardFocus();
     throw e;
   }
 }
@@ -881,7 +1037,10 @@ function buildEscPosBytes(order, cfg) {
 
   // Avança papel e corta
   raw(0x0A, 0x0A, 0x0A, 0x0A);
-  raw(0x1D, 0x56, 0x42, 0x03); // GS V — corte parcial
+  raw(0x1D, 0x56, 0x42, 0x03); // GS V B 3 — corte parcial (formato novo, Epson e compatíveis)
+  raw(0x1D, 0x56, 0x01);       // GS V 1 — corte parcial (formato antigo)
+  raw(0x1D, 0x56, 0x41, 0x03); // GS V A 3 — corte total (formato novo)
+  raw(0x1D, 0x56, 0x00);       // GS V 0 — corte total (formato antigo; alguns modelos só têm corte total, não parcial)
 
   return Buffer.from(buf);
 }
@@ -1103,8 +1262,40 @@ function setupIPC() {
     if (cfg.printViaMode !== undefined)    store.set('printViaMode', cfg.printViaMode);
     if (cfg.printFormat !== undefined)     store.set('printFormat', cfg.printFormat);
     if (cfg.printMode !== undefined)       store.set('printMode', cfg.printMode);
-    // Atualiza tray
-    if (tray) createTray();
+    // Atualiza tray sem recriar do zero (evita ícone duplicado no Windows)
+    if (tray) {
+      const contextMenu = Menu.buildFromTemplate([
+        {
+          label: '📋 Abrir EstimaFood',
+          click: () => {
+            if (mainWindow) { mainWindow.show(); forceRealFocus(mainWindow); }
+            else createWindow();
+          }
+        },
+        { type: 'separator' },
+        { label: '🖨️ Impressora: ' + (store.get('printer') || 'Padrão do sistema'), enabled: false },
+        { label: '📄 Papel: ' + store.get('paperWidth') + 'mm', enabled: false },
+        { type: 'separator' },
+        {
+          label: '⚙️ Configurações',
+          click: () => {
+            if (mainWindow) {
+              mainWindow.show(); forceRealFocus(mainWindow);
+              mainWindow.webContents.executeJavaScript("typeof nav==='function'&&nav('impressao')").catch(() => {});
+            }
+          }
+        },
+        {
+          label: '⌨️ Corrigir teclado travado',
+          click: () => { if (mainWindow) { mainWindow.show(); forceRealFocus(mainWindow); } }
+        },
+        { label: '🔄 Recarregar', click: () => { if (mainWindow) mainWindow.reload(); } },
+        { label: '🔧 DevTools', visible: isDev, click: () => { if (mainWindow) mainWindow.webContents.toggleDevTools(); } },
+        { type: 'separator' },
+        { label: '❌ Sair', click: () => { isQuitting = true; app.quit(); } }
+      ]);
+      tray.setContextMenu(contextMenu);
+    }
     log('💾 Config salva:', JSON.stringify(cfg));
     return { ok: true };
   });
@@ -1174,6 +1365,42 @@ function setupIPC() {
     }
   });
 
+  // Watchdog anti-teclado-travado (ver comentário completo no preload.js).
+  // Disparado toda vez que o usuário clica/foca um campo de texto na
+  // página. Usa a MESMA técnica comprovada (forceRealFocus: minimize +
+  // restore) que já resolve o problema em outros pontos do app — um
+  // toggle "leve" sem minimize/restore foi testado e NÃO se mostrou
+  // confiável pra restaurar o foco de teclado real do Windows, por isso
+  // trocamos pra técnica que realmente funciona. Causa um piscar rápido
+  // (blink) na janela, mas só quando necessário (throttle de 2s) — melhor
+  // um piscar rápido do que não conseguir digitar.
+  let _lastInputFocusFix = 0;
+  ipcMain.on('input:activity', () => {
+    try {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (!mainWindow.isVisible() || mainWindow.isMinimized()) return;
+      const now = Date.now();
+      if (now - _lastInputFocusFix < 2000) return;
+      _lastInputFocusFix = now;
+      forceRealFocus(mainWindow);
+    } catch {}
+  });
+
+  // Fechamento de confirm()/alert()/prompt() nativo (injetado via
+  // did-finish-load — ver comentário lá). É o gatilho mais bem documentado
+  // do bug de teclado travado no Electron/Windows (usado em ~50 lugares
+  // diferentes no Anotaí: cancelar pedido, excluir item, excluir mesa,
+  // etc.) — provavelmente a causa mais frequente de todas. Sem throttle
+  // aqui: cada diálogo fechado é um evento raro e intencional do usuário,
+  // sempre vale reforçar o foco.
+  ipcMain.on('dialog:closed', () => {
+    try {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (!mainWindow.isVisible() || mainWindow.isMinimized()) return;
+      forceRealFocus(mainWindow);
+    } catch {}
+  });
+
   // Notificação nativa
   ipcMain.handle('app:notify', async (_e, title, body) => {
     if (Notification.isSupported()) {
@@ -1184,21 +1411,42 @@ function setupIPC() {
         silent: false,
       });
       notif.show();
+      // A criação de QUALQUER notificação nativa do Windows pode fazer o SO
+      // "roubar" o foco real de teclado da janela principal em segundo plano
+      // (mesmo ela continuando visível/na frente) — é o mesmo bug de fundo
+      // dos comentários no topo do arquivo (forceRealFocus), só que disparado
+      // aqui em vez de minimize/tray. Como isso roda a CADA pedido novo (via
+      // SSE), é provavelmente o gatilho mais frequente do teclado travar —
+      // mais frequente até que a própria impressão. Restaura o foco logo em
+      // seguida, sem o usuário perceber.
+      restoreKeyboardFocus();
     }
     return { ok: true };
   });
 
   // Setup inicial — salvar URL do servidor
   ipcMain.handle('app:setServerUrl', async (_e, url) => {
-    // Garante que serverUrl aponta para o gestor (usado para extrair origin)
-    let cleanUrl = url.replace(/\/$/, '');
-    if (!cleanUrl.includes('gestor.html')) {
-      try { cleanUrl = new URL(cleanUrl).origin + '/gestor.html'; } catch {}
-    }
-    store.set('serverUrl', cleanUrl);
-    log('🌐 URL salva:', cleanUrl);
+    store.set('serverUrl', url.replace(/\/$/, ''));
+    log('🌐 URL salva:', url);
     if (mainWindow) {
-      loadLoginPage();
+      mainWindow.loadURL(store.get('serverUrl'));
+    }
+    // Se tinha uma atualização baixada esperando o login/setup terminar,
+    // agora que o acesso foi configurado, agenda a instalação com folga
+    // (2 min) pra não interromper o primeiro uso logo depois de logar.
+    if (pendingUpdateInstall) {
+      const versao = pendingUpdateInstall;
+      pendingUpdateInstall = null;
+      log(`⏳ Login concluído — instalando atualização ${versao} pendente em 2 minutos...`);
+      setTimeout(() => {
+        try {
+          const { autoUpdater } = require('electron-updater');
+          store.set('lastUpdateInstallAt', Date.now());
+          store.set('lastUpdateInstallVersion', versao);
+          isQuitting = true;
+          autoUpdater.quitAndInstall(false, true);
+        } catch {}
+      }, 120000);
     }
     return { ok: true };
   });
@@ -1219,6 +1467,19 @@ function setupIPC() {
   ipcMain.handle('app:restart', async () => {
     app.relaunch();
     app.exit(0);
+  });
+
+  // Navega direto para a serverUrl sem reiniciar o app (usado na tela offline)
+  ipcMain.handle('app:loadServerUrl', async () => {
+    const url = store.get('serverUrl');
+    if (!url || !mainWindow || mainWindow.isDestroyed()) return { ok: false };
+    try {
+      await mainWindow.loadURL(url);
+      return { ok: true };
+    } catch (err) {
+      log('❌ app:loadServerUrl falhou:', err.message);
+      return { ok: false, error: err.message };
+    }
   });
 
   // Versão
@@ -1243,6 +1504,7 @@ const pqHttps = require('https');
 let _pqTimer = null;
 let _pqHbTimer = null;
 let _pqActive = false;
+let _pqJobCount = 0;
 
 function _pqRequest(method, baseUrl, urlPath, tenantId, body) {
   return new Promise((resolve, reject) => {
@@ -1305,7 +1567,7 @@ function startPrintQueuePolling() {
     if (!_pqActive) return;
     const tid = _pqGetTenantId();
     if (!tid) return;
-    _pqRequest('POST', baseUrl, '/api/print-queue/heartbeat', tid, { printer: APP_AGENT_NAME }).catch(() => {});
+    _pqRequest('POST', baseUrl, '/api/print-queue/heartbeat', tid, { printer: 'EstimaFoodPrint' }).catch(() => {});
   };
   hb();
   _pqHbTimer = setInterval(hb, 30000);
@@ -1360,79 +1622,24 @@ function stopPrintQueuePolling() {
 }
 
 async function _pqPrintJob(job) {
+  // Usa o printSilentElectron que já existe no app
   const opts = {
     printer: job.printer || store.get('printer') || '',
     paperWidth: parseInt(job.format) || store.get('paperWidth') || 80,
   };
-  const result = await printSilentElectron(job.html, opts);
-  // Atualiza contadores globais para a tela de status
-  _pqLastPrint = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-  return result;
+  return await printSilentElectron(job.html, opts);
 }
 
 // ── IPC para o gestor informar o tenant_id ──────────────────
-// O gestor/login chama ElectronPrint.setTenantId(tid) ao fazer login
+// O gestor.html chama ElectronPrint.setTenantId(tid) ao fazer login
+// Isso permite o polling saber qual tenant buscar
 ipcMain.handle('print:setTenantId', (_e, tid) => {
   if (tid && tid !== store.get('_pqTenantId')) {
     store.set('_pqTenantId', tid);
     log('[PQ] Tenant definido:', tid);
+    // Inicia polling se ainda não está rodando
     if (!_pqActive) startPrintQueuePolling();
   }
-
-  // Auto-hide: após login, esconde janela e mostra notificação
-  if (tid && !_loginDone) {
-    _loginDone = true;
-    log('🫥 Login detectado! Minimizando para bandeja...');
-    if (Notification.isSupported()) {
-      new Notification({
-        title: APP_DISPLAY_NAME,
-        body: '✅ Serviço de impressão ativo! O app está na bandeja do sistema.',
-        icon: getIcon(),
-      }).show();
-    }
-    // Atualiza tray com status conectado
-    createTray();
-    // Esconde janela após um breve delay (UX: mostra notificação antes)
-    setTimeout(() => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.loadFile(path.join(__dirname, 'status.html'));
-        mainWindow.hide();
-      }
-    }, 1500);
-  }
-  return { ok: true };
-});
-
-// ── IPC: Status para a tela local ───────────────────────────
-ipcMain.handle('app:getStatus', () => {
-  const tid = store.get('_pqTenantId') || '';
-  const session = store.get('_savedSession');
-  return {
-    connected: !!tid && _pqActive,
-    nome: (session && session.nome) || '',
-    tenantId: tid,
-    jobCount: _pqJobCount,
-    lastPrint: _pqLastPrint || '',
-    polling: _pqActive,
-  };
-});
-
-ipcMain.handle('app:logout', () => {
-  store.delete('_pqTenantId');
-  store.delete('_savedSession');
-  _loginDone = false;
-  stopPrintQueuePolling();
-  createTray();
-  log('🚪 Logout realizado');
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    loadLoginPage();
-    mainWindow.show();
-  }
-  return { ok: true };
-});
-
-ipcMain.handle('app:hideWindow', () => {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
   return { ok: true };
 });
 
@@ -1451,10 +1658,11 @@ function setupUpdater() {
       log('📦 Atualização disponível:', info.version);
       if (Notification.isSupported()) {
         new Notification({
-          title: APP_DISPLAY_NAME,
+          title: 'EstimaFood',
           body: `Baixando versão ${info.version}...`,
           icon: getIcon(),
         }).show();
+        restoreKeyboardFocus();
       }
     });
 
@@ -1467,14 +1675,50 @@ function setupUpdater() {
     });
 
     autoUpdater.on('update-downloaded', (info) => {
+      // ── Trava anti-loop ──────────────────────────────────────
+      // Se a versão que acabou de baixar é a MESMA que já tentamos instalar
+      // recentemente, ou se instalamos alguma coisa há menos de 10 minutos,
+      // NÃO reinicia de novo. Isso existe pra nunca mais deixar o app preso
+      // num ciclo de abre-fecha-abre-fecha (ex: feed de update quebrado
+      // sempre "achando" uma versão nova, mesmo já instalada). Em vez de
+      // reiniciar, só avisa e para — é bem melhor travar a auto-atualização
+      // do que travar o usuário fora do sistema.
+      const lastInstallAt = Number(store.get('lastUpdateInstallAt') || 0);
+      const lastInstallVersion = store.get('lastUpdateInstallVersion') || '';
+      const minutesSinceLast = (Date.now() - lastInstallAt) / 60000;
+      if (lastInstallVersion === info.version && minutesSinceLast < 10) {
+        log(`🛑 Loop de atualização detectado (versão ${info.version} repetida em <10min). Instalação automática CANCELADA por segurança.`);
+        if (Notification.isSupported()) {
+          new Notification({
+            title: 'EstimaFood',
+            body: `Atualização ${info.version} detectada de novo rápido demais — instalação automática pausada. Reinicie manualmente se precisar.`,
+            icon: getIcon(),
+          }).show();
+        }
+        return;
+      }
+
+      // Não interrompe o primeiro acesso: se a tela de login/setup ainda
+      // está aberta (usuário nunca configurou o servidor), espera ele
+      // terminar antes de reiniciar por baixo dos pés dele.
+      const aindaNaTelaDeLogin = !store.get('serverUrl');
+      if (aindaNaTelaDeLogin) {
+        log('⏸️ Atualização baixada, mas aguardando login/setup terminar antes de reiniciar.');
+        pendingUpdateInstall = info.version;
+        return;
+      }
+
       log('✅ Atualização baixada:', info.version, '— instalando em 10s...');
       if (Notification.isSupported()) {
         new Notification({
-          title: APP_DISPLAY_NAME,
+          title: 'EstimaFood',
           body: `Versão ${info.version} pronta! Reiniciando em 10 segundos...`,
           icon: getIcon(),
         }).show();
+        restoreKeyboardFocus();
       }
+      store.set('lastUpdateInstallAt', Date.now());
+      store.set('lastUpdateInstallVersion', info.version);
       // Instala automaticamente após 10 segundos
       setTimeout(() => {
         isQuitting = true;
@@ -1486,8 +1730,11 @@ function setupUpdater() {
       log('⚠️ Updater erro:', err.message);
     });
 
-    // Verifica ao iniciar
-    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    // Verifica ao iniciar — com atraso de 60s pra nunca interromper login/
+    // setup logo na abertura do app (antes o check rodava instantaneamente).
+    setTimeout(() => {
+      autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    }, 60000);
     // Verifica a cada 30 minutos (em vez de 4h)
     setInterval(() => {
       autoUpdater.checkForUpdatesAndNotify().catch(() => {});
@@ -1502,31 +1749,23 @@ function setupUpdater() {
 // EncodedCommand (UTF-16LE base64 — bypassa todo problema de quoting do cmd.exe).
 // Sempre aplica os dois métodos, pois setLoginItemSettings pode falhar
 // silenciosamente em Windows com política de grupo ou antivírus agressivo,
-// e pode usar um nome de chave diferente do nosso ("EstimaFood Print" vs
-// "EstimaFoodPrint"), deixando entrada obsoleta no registry após updates.
-const REG_NAME = APP_REG_NAME;
+// e pode usar um nome de chave diferente do nosso ("EstimaFood" vs
+// "EstimaFoodApp"), deixando entrada obsoleta no registry após updates.
+const REG_NAME = 'EstimaFood';
 
 function _applyRegistryAutoStart(enabled, exePath) {
   return new Promise((resolve) => {
     const { exec } = require('child_process');
-    // PowerShell script usa single-quotes internamente — sem problema com
-    // paths que têm espaços, acentos ou outros caracteres especiais.
-    // Single-quotes no path são escapadas como '' (padrão PowerShell).
     let psScript;
     if (enabled) {
       const safePath = exePath.replace(/'/g, "''");
-      // Valor gravado no registry: "C:\path with spaces\app.exe" --hidden
-      // As aspas duplas são necessárias para Windows interpretar paths com espaços.
-      psScript = `Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${REG_NAME}' -Value '"${safePath}" --hidden' -Type String -Force`;
+      psScript = `Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${REG_NAME}' -Value '"${safePath}"' -Type String -Force`;
     } else {
-      // Remove nossa entrada E também a entrada que Electron pode ter criado
-      // com nome diferente (produto: "EstimaFood Print") para garantir disable total.
       psScript = [
         `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${REG_NAME}' -ErrorAction SilentlyContinue`,
-        `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${APP_DISPLAY_NAME}' -ErrorAction SilentlyContinue`,
+        `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'EstimaFood' -ErrorAction SilentlyContinue`,
       ].join('; ');
     }
-    // -EncodedCommand recebe UTF-16LE em base64 — bypassa o quoting do cmd.exe
     const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
     const cmd = `powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
     exec(cmd, { timeout: 8000 }, (err) => {
@@ -1547,11 +1786,50 @@ function _checkRegistryAutoStart() {
     const cmd = `reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "${REG_NAME}"`;
     exec(cmd, { timeout: 5000 }, (err, stdout) => {
       if (err) { resolve(null); return; }
-      // Saída típica: "    EstimaFoodPrint    REG_SZ    <valor>"
       const match = (stdout || '').match(/REG_SZ\s+(.+)/);
-      // Se regex não bateu, retorna null — não usa stdout bruto para evitar
-      // falsa comparação de paths.
       resolve(match ? match[1].trim() : null);
+    });
+  });
+}
+
+// ── Método 3: atalho na pasta Startup ────────────────────────
+// A chave Run do registry pode ser apagada por antivírus/"otimizadores" em
+// muitos notebooks, ou o Windows simplesmente ignorar a entrada silenciosamente.
+// O atalho na pasta Startup (shell:startup) é o método mais tradicional e
+// resistente — é o que o próprio Explorer usa e aparece em
+// Configurações > Apps > Inicialização, então o cliente também consegue ver
+// e confirmar visualmente que está ativado.
+function _applyStartupFolderShortcut(enabled, exePath) {
+  return new Promise((resolve) => {
+    const { exec } = require('child_process');
+    const startupDir = path.join(os.homedir(), 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+    const lnkPath = path.join(startupDir, 'EstimaFood.lnk');
+    let psScript;
+    if (enabled) {
+      const safeExe = exePath.replace(/'/g, "''");
+      const safeLnk = lnkPath.replace(/'/g, "''");
+      const safeDir = path.dirname(exePath).replace(/'/g, "''");
+      psScript = [
+        `$s = (New-Object -ComObject WScript.Shell).CreateShortcut('${safeLnk}')`,
+        `$s.TargetPath = '${safeExe}'`,
+        `$s.WorkingDirectory = '${safeDir}'`,
+        `$s.WindowStyle = 1`,
+        `$s.Save()`,
+      ].join('; ');
+    } else {
+      const safeLnk = lnkPath.replace(/'/g, "''");
+      psScript = `Remove-Item -Path '${safeLnk}' -ErrorAction SilentlyContinue`;
+    }
+    const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+    const cmd = `powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
+    exec(cmd, { timeout: 8000 }, (err) => {
+      if (err) {
+        log('⚠️ Startup folder shortcut erro:', err.message);
+        resolve(false);
+      } else {
+        log('🚀 Startup folder shortcut ' + (enabled ? 'criado' : 'removido'));
+        resolve(true);
+      }
     });
   });
 }
@@ -1563,16 +1841,32 @@ async function setupAutoStart() {
     const exePath = app.getPath('exe');
 
     // Método 1: Electron API (tenta, mas pode falhar silenciosamente)
+    // openAsHidden:false + sem args --hidden — o app deve abrir a janela
+    // normalmente ao iniciar com o Windows, igual outros programas (Anotaí
+    // etc.), não ficar escondido só na bandeja esperando o usuário clicar.
     try {
-      app.setLoginItemSettings({ openAtLogin: enabled, path: exePath, args: ['--hidden'] });
+      app.setLoginItemSettings({ openAtLogin: enabled, openAsHidden: false, path: exePath });
     } catch (e) {
       log('⚠️ setLoginItemSettings erro:', e.message);
     }
 
-    // Método 2: Registry direto via PowerShell EncodedCommand (sempre aplica)
-    // Garante autostart mesmo que Electron API falhe ou use chave diferente.
-    const ok = await _applyRegistryAutoStart(enabled, exePath);
-    log('🚀 AutoStart:', enabled ? 'habilitado' : 'desabilitado', '| registry:', ok ? 'ok' : 'falhou', '|', exePath);
+    // Método 2: Registry direto via PowerShell EncodedCommand
+    const okReg = await _applyRegistryAutoStart(enabled, exePath);
+
+    // Método 3: atalho na pasta Startup (independente do registry)
+    const okLnk = await _applyStartupFolderShortcut(enabled, exePath);
+
+    // Auto-cura: se o caminho salvo no registry não bate com o exe atual
+    // (ex: após update de versão que mudou de pasta), força regravação.
+    if (enabled) {
+      const current = await _checkRegistryAutoStart();
+      if (!current || !current.includes(exePath)) {
+        log('🔧 Registry autostart desatualizado, regravando...');
+        await _applyRegistryAutoStart(true, exePath);
+      }
+    }
+
+    log('🚀 AutoStart:', enabled ? 'habilitado' : 'desabilitado', '| registry:', okReg ? 'ok' : 'falhou', '| startup-folder:', okLnk ? 'ok' : 'falhou', '|', exePath);
   } catch (e) {
     log('⚠️ AutoStart erro:', e.message);
   }
@@ -1583,9 +1877,7 @@ ipcMain.handle('app:getAutoStart', async () => {
   if (process.platform !== 'win32') return { supported: false, enabled: false };
   try {
     const exePath = app.getPath('exe');
-    // Checa nossa entrada no registry (fonte da verdade para nossa escrita)
     const regVal = await _checkRegistryAutoStart();
-    // Considera habilitado se o valor contém o exe atual
     const enabledInRegistry = !!(regVal && regVal.includes(exePath));
     return { supported: true, enabled: enabledInRegistry, stored: !!store.get('autoStart') };
   } catch (e) {
@@ -1635,10 +1927,8 @@ if (!gotLock) {
 } else {
   app.on('second-instance', () => {
     if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
       if (!mainWindow.isVisible()) mainWindow.show();
-      mainWindow.focus();
-      mainWindow.webContents.focus();
+      forceRealFocus(mainWindow);
     }
   });
 
@@ -1652,17 +1942,65 @@ if (!gotLock) {
     startPrintQueuePolling(); // Inicia polling do print-queue
 
     // Auto-updater só em produção
-    if (!isDev && APP_ENABLE_UPDATER) setupUpdater();
+    if (!isDev) setupUpdater();
+
+    // Fix global teclado: registrado UMA vez aqui, não dentro de createWindow
+    app.on('browser-window-focus', (_e, win) => {
+      if (win === mainWindow && !mainWindow.isDestroyed()) {
+        setTimeout(() => {
+          if (!mainWindow || mainWindow.isDestroyed()) return;
+          mainWindow.webContents.focus();
+        }, 150);
+      }
+    });
+
+    // ── Watchdog CONTÍNUO anti-teclado-travado ──────────────────────
+    // As correções anteriores só agiam em RESPOSTA a um evento (clique,
+    // impressão, notificação). Mas o travamento também acontece no MEIO do
+    // uso, sem nenhum evento novo disparando nada — por isso continuava
+    // acontecendo mesmo com as correções anteriores. Esse watchdog roda
+    // sozinho a cada poucos segundos, o tempo todo, reforçando o foco de
+    // teclado continuamente enquanto o app estiver aberto e visível — sem
+    // depender de clique, impressão ou qualquer gatilho específico. O
+    // toggle setEnabled(false→true) é instantâneo e invisível (sem piscar
+    // a janela), então rodar isso o tempo todo não atrapalha o uso normal.
+    setInterval(() => {
+      try {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        if (!mainWindow.isVisible() || mainWindow.isMinimized()) return;
+        if (!mainWindow.isFocused()) return; // só mexe se a janela estiver mesmo em uso
+        mainWindow.webContents.focus();
+        mainWindow.setEnabled(false);
+        mainWindow.setEnabled(true);
+      } catch {}
+    }, 3000);
+
+    // Atalho de emergência: corrige o teclado travado na hora, sem precisar
+    // fechar e reabrir o app (que reseta um pedido em digitação). Funciona
+    // mesmo se o teclado estiver "travado" porque não depende de digitação —
+    // é um atalho GLOBAL do sistema operacional.
+    try {
+      globalShortcut.register('Control+Alt+K', () => {
+        log('⌨️ Atalho de correção de teclado acionado (Ctrl+Alt+K)');
+        restoreKeyboardFocus();
+      });
+    } catch (e) {
+      log('⚠️ Não foi possível registrar atalho de teclado:', e.message);
+    }
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
-      else if (mainWindow) { mainWindow.show(); mainWindow.focus(); mainWindow.webContents.focus(); }
+      else if (mainWindow) { mainWindow.show(); forceRealFocus(mainWindow); }
     });
 
-    log(`✅ ${APP_DISPLAY_NAME} iniciado | versão:`, app.getVersion());
+    log('✅ EstimaFood iniciado | versão:', app.getVersion());
   });
 
   app.on('before-quit', () => { isQuitting = true; });
+
+  app.on('will-quit', () => {
+    try { globalShortcut.unregisterAll(); } catch {}
+  });
 
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin' && !store.get('minimizeToTray')) {

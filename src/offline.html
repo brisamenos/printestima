@@ -2,7 +2,7 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <title>PrintEstima Web 2 — Offline</title>
+  <title>EstimaFood Print — Offline</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -51,9 +51,10 @@
     <div class="icon">📡</div>
     <h1>Sem conexão</h1>
     <p>Não foi possível conectar ao servidor.<br>Verifique sua internet e tente novamente.</p>
-    <button class="btn" onclick="location.reload()">🔄 Tentar novamente</button>
+    <button class="btn" onclick="manualRetry()">🔄 Tentar novamente</button>
     <button class="btn btn-outline" onclick="resetUrl()">⚙️ Trocar URL</button>
     <div class="url" id="url"></div>
+    <p style="margin-top:16px;font-size:12px;color:#52525b;">Reconectando automaticamente em <span id="countdown">15</span>s...</p>
   </div>
   <script>
     (async () => {
@@ -62,12 +63,47 @@
         document.getElementById('url').textContent = url || '';
       }
     })();
+
     async function resetUrl() {
       if (window.ElectronPrint) {
         await window.ElectronPrint.setServerUrl('');
         await window.ElectronPrint.restart();
       }
     }
+
+    // Auto-retry com countdown
+    let secs = 15;
+    let timer = null;
+    const cd = document.getElementById('countdown');
+
+    function startCountdown() {
+      secs = 15;
+      cd.textContent = secs;
+      if (timer) clearInterval(timer);
+      timer = setInterval(() => {
+        secs--;
+        cd.textContent = secs;
+        if (secs <= 0) {
+          clearInterval(timer);
+          timer = null;
+          manualRetry();
+        }
+      }, 1000);
+    }
+
+    async function manualRetry() {
+      if (window.ElectronPrint) {
+        const result = await window.ElectronPrint.loadServerUrl();
+        // Se falhou de novo, reinicia o countdown
+        if (!result || !result.ok) {
+          startCountdown();
+        }
+      } else {
+        location.reload();
+      }
+    }
+
+    startCountdown();
   </script>
 </body>
 </html>
