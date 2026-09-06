@@ -1,7 +1,7 @@
 {
-  "name": "estimafood-print-2",
-  "version": "2.0.5",
-  "description": "PrintEstima Web 2 — Serviço de Impressão em Segundo Plano",
+  "name": "estimafood-print-win7",
+  "version": "1.10.34",
+  "description": "EstimaFood — Impressão Automática para Restaurantes (compatível com Windows 7/8/8.1)",
   "main": "src/main.js",
   "author": "EstimaFood",
   "license": "MIT",
@@ -9,8 +9,7 @@
     "start": "electron .",
     "dev": "cross-env NODE_ENV=development electron .",
     "build": "electron-builder",
-    "build:win": "electron-builder --win --publish never",
-    "release:win": "electron-builder --win --publish always",
+    "build:win": "electron-builder --win --publish always",
     "build:mac": "electron-builder --mac",
     "build:linux": "electron-builder --linux",
     "postinstall": "electron-builder install-app-deps || true"
@@ -27,14 +26,15 @@
     "usb": "^2.14.0"
   },
   "devDependencies": {
-    "electron": "^33.2.1",
+    "electron": "22.3.27",
     "electron-builder": "^25.1.8",
     "cross-env": "^7.0.3"
   },
   "build": {
-    "appId": "com.estimafood.print2",
-    "productName": "PrintEstima Web 2",
-    "artifactName": "PrintEstimaWeb2-${version}-${os}-${arch}.${ext}",
+    "appId": "com.estimafood.print.win7",
+    "productName": "EstimaFood",
+    "artifactName": "EstimaFood-${version}-win7-${os}-${arch}.${ext}",
+    "npmRebuild": false,
     "directories": {
       "output": "dist",
       "buildResources": "assets"
@@ -49,7 +49,8 @@
         {
           "target": "nsis",
           "arch": [
-            "x64"
+            "x64",
+            "ia32"
           ]
         }
       ],
@@ -62,7 +63,7 @@
       "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "PrintEstima Web 2",
+      "shortcutName": "EstimaFood",
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "installerSidebar": null,
@@ -82,6 +83,10 @@
       ],
       "icon": "assets/icon.png",
       "category": "Office"
+    },
+    "publish": {
+      "provider": "github",
+      "releaseType": "release"
     }
   }
 }
