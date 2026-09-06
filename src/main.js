@@ -44,7 +44,7 @@ const store = new Store({
     networkPrinterIp: '',
     networkPrinterPort: 9100,
     windowBounds: { width: 1280, height: 800 },
-    disableGpu: false, // usuário pode ligar manualmente se PC antigo trava
+    disableGpu: true, // Win7: aceleração de GPU do Chromium costuma dar tela branca em placas antigas
   }
 });
 
