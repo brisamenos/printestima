@@ -336,6 +336,16 @@ function createWindow() {
     }
   });
 
+  // Windows desligando/reiniciando/saindo da conta: libera o fechamento.
+  // Sem isso o "minimizar para a bandeja" acima segurava a janela, o Windows
+  // mostrava "EstimaFood está impedindo o encerramento" e, ao forçar,
+  // aparecia o erro 0x80000003 (o Windows matava o programa no meio).
+  mainWindow.on('session-end', () => {
+    isQuitting = true;
+    try { log('⏻ Windows encerrando a sessão — fechando o EstimaFood'); } catch {}
+    try { app.exit(0); } catch {}
+  });
+
   mainWindow.on('closed', () => { mainWindow = null; });
 
   // Links externos abrem no navegador
