@@ -53,6 +53,30 @@ if (store.get('disableGpu')) {
   try { app.disableHardwareAcceleration(); } catch {}
 }
 
+// ── Certificado do site em Windows 7 antigo ────────────────
+// Sem a raiz da Let's Encrypt instalada no Windows, o site era recusado e a
+// janela ficava em branco. Aceita SÓ quando a cadeia confere com a raiz
+// ISRG embutida no programa (ver certificados.js); o resto segue recusado.
+const { confiarNaCadeia } = require('./certificados');
+app.on('certificate-error', (event, _wc, url, error, certificate, callback) => {
+  let ok = false;
+  try { ok = error === 'net::ERR_CERT_AUTHORITY_INVALID' && confiarNaCadeia(url, certificate); }
+  catch (e) { try { log('⚠️ certificado:', e.message); } catch {} }
+  try { log(ok ? '🔐 Certificado conferido pela raiz embutida:' : `🔒 Certificado recusado (${error}):`, url); } catch {}
+  if (ok) { event.preventDefault(); callback(true); } else { callback(false); }
+});
+
+// Mostra a tela "Sem conexão" dizendo o motivo (ex.: data do computador errada)
+function _codigoErroRede(err) {
+  const m = String((err && (err.code || err.message)) || '').match(/ERR_[A-Z_]+/);
+  return m ? m[0] : '';
+}
+function mostrarOffline(err) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const motivo = _codigoErroRede(err);
+  mainWindow.loadFile(path.join(__dirname, 'offline.html'), { query: motivo ? { motivo } : {} }).catch(() => {});
+}
+
 // ── Variáveis globais ───────────────────────────────────────
 let mainWindow = null;
 let tray = null;
@@ -233,12 +257,14 @@ function createWindow() {
       mainWindow.loadURL(serverUrl).catch(err => {
         log(`❌ Tentativa ${attempt} falhou:`, err.message);
         if (!mainWindow || mainWindow.isDestroyed()) return;
+        // Erro de certificado não se resolve tentando de novo: mostra já o motivo
+        if (_codigoErroRede(err).startsWith('ERR_CERT_')) { mostrarOffline(err); return; }
         if (attempt < maxAttempts) {
           log(`⏳ Aguardando ${delay / 1000}s antes da próxima tentativa...`);
           setTimeout(() => tryLoad(attempt + 1, maxAttempts, Math.min(delay * 1.5, 15000)), delay);
         } else {
           log('❌ Todas as tentativas falharam. Mostrando tela offline.');
-          mainWindow.loadFile(path.join(__dirname, 'offline.html'));
+          mostrarOffline(err);
         }
       });
     };
@@ -456,7 +482,26 @@ function getSysPrinters() {
   return mainWindow.webContents.getPrintersAsync();
 }
 
-async function printSilentElectron(html, opts = {}) {
+// ── Fila única de impressão ─────────────────────────────────
+// O gestor (aberto dentro deste app) e a fila do servidor (pedidos do garçom,
+// setores) podem mandar imprimir AO MESMO TEMPO. Dois envios simultâneos para
+// a mesma térmica misturam os dados no meio do caminho e o cupom sai com um
+// bloco de caracteres estranhos (o pedaço de um cupom vira "texto" no outro).
+// Aqui todo envio entra numa fila: um termina, espera um respiro curto para a
+// impressora esvaziar o buffer, e só então o próximo começa.
+let _filaImpressao = Promise.resolve();
+const RESPIRO_ENTRE_IMPRESSOES_MS = 1500;
+function naFilaDeImpressao(tarefa) {
+  const vez = _filaImpressao.then(tarefa);
+  _filaImpressao = vez.catch(() => {}).then(() => new Promise(r => setTimeout(r, RESPIRO_ENTRE_IMPRESSOES_MS)));
+  return vez;
+}
+
+function printSilentElectron(html, opts = {}) {
+  return naFilaDeImpressao(() => _printSilentElectronAgora(html, opts));
+}
+
+async function _printSilentElectronAgora(html, opts = {}) {
   const printer = opts.printer || store.get('printer') || '';
   const paperWidth = opts.paperWidth || store.get('paperWidth') || 80;
 
@@ -1045,7 +1090,11 @@ function buildEscPosBytes(order, cfg) {
   return Buffer.from(buf);
 }
 
-async function printRawEscPos(order, cfg) {
+function printRawEscPos(order, cfg) {
+  return naFilaDeImpressao(() => _printRawEscPosAgora(order, cfg));
+}
+
+async function _printRawEscPosAgora(order, cfg) {
   const printerName = cfg.printer || '';
   const data = buildEscPosBytes(order, cfg);
 
@@ -1478,6 +1527,10 @@ function setupIPC() {
       return { ok: true };
     } catch (err) {
       log('❌ app:loadServerUrl falhou:', err.message);
+      // A tentativa que falhou tira a janela da tela "Sem conexão" e deixa
+      // uma página vazia, sem ninguém pra tentar de novo (tela em branco
+      // para sempre). Volta pra tela offline, que segue tentando sozinha.
+      mostrarOffline(err);
       return { ok: false, error: err.message };
     }
   });

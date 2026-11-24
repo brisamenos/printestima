@@ -49,14 +49,32 @@
 <body>
   <div class="card">
     <div class="icon">📡</div>
-    <h1>Sem conexão</h1>
-    <p>Não foi possível conectar ao servidor.<br>Verifique sua internet e tente novamente.</p>
+    <h1 id="titulo">Sem conexão</h1>
+    <p id="explica">Não foi possível conectar ao servidor.<br>Verifique sua internet e tente novamente.</p>
     <button class="btn" onclick="manualRetry()">🔄 Tentar novamente</button>
     <button class="btn btn-outline" onclick="resetUrl()">⚙️ Trocar URL</button>
     <div class="url" id="url"></div>
     <p style="margin-top:16px;font-size:12px;color:#52525b;">Reconectando automaticamente em <span id="countdown">15</span>s...</p>
   </div>
   <script>
+    // Motivo enviado pelo programa (?motivo=ERR_...) — explica em português
+    (function () {
+      var motivo = new URLSearchParams(location.search).get('motivo') || '';
+      var t = document.getElementById('titulo'), e = document.getElementById('explica');
+      if (motivo === 'ERR_CERT_DATE_INVALID') {
+        t.textContent = 'Data do computador errada';
+        e.innerHTML = 'O site foi bloqueado porque a <b>data ou a hora deste computador</b> está errada.<br>Acerte a data e a hora no relógio do Windows (canto da tela) e clique em Tentar novamente.';
+      } else if (motivo.indexOf('ERR_CERT_') === 0) {
+        t.textContent = 'Certificado do site recusado';
+        e.innerHTML = 'O Windows não confiou no certificado de segurança do site.<br>Confira se a data e a hora do computador estão certas e tente novamente.';
+      } else if (motivo === 'ERR_NAME_NOT_RESOLVED' || motivo === 'ERR_INTERNET_DISCONNECTED') {
+        e.innerHTML = 'O computador está sem internet ou não achou o endereço do site.<br>Verifique a internet e tente novamente.';
+      }
+      if (motivo) {
+        var c = document.createElement('div'); c.className = 'url'; c.textContent = 'Código: ' + motivo;
+        document.getElementById('url').after(c);
+      }
+    })();
     (async () => {
       if (window.ElectronPrint) {
         const url = await window.ElectronPrint.getServerUrl();
